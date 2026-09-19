@@ -1,19 +1,35 @@
-# Copyright (C) 2026 The Android Open Source Project
-# SPDX-License-Identifier: Apache-2.0
+#
+# OrangeFox device configuration for Xiaomi/Redmi beryl
+# Target: vendor_boot recovery, boot-only bring-up
+#
 
 DEVICE_PATH := device/xiaomi/beryl
 ALLOW_MISSING_DEPENDENCIES := true
 
 # A/B
 AB_OTA_UPDATER := true
-AB_OTA_PARTITIONS += system system_ext vendor product vendor_dlkm odm_dlkm boot vbmeta_system vbmeta_vendor
-BOARD_USES_RECOVERY_AS_BOOT := true
+AB_OTA_PARTITIONS += \
+    system \
+    system_ext \
+    product \
+    vendor \
+    vendor_dlkm \
+    odm_dlkm \
+    boot \
+    vbmeta_system \
+    vbmeta_vendor
 
-# Architecture
+# Vendor_boot recovery
+BOARD_USES_RECOVERY_AS_BOOT :=
+BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT := true
+BOARD_MOVE_GSI_AVB_KEYS_TO_VENDOR_BOOT := true
+BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT := true
+BOARD_USES_GENERIC_KERNEL_IMAGE := true
+
 TARGET_ARCH := arm64
 TARGET_ARCH_VARIANT := armv8-a
 TARGET_CPU_ABI := arm64-v8a
-TARGET_CPU_ABI2 := 
+TARGET_CPU_ABI2 :=
 TARGET_CPU_VARIANT := generic
 TARGET_CPU_VARIANT_RUNTIME := cortex-a55
 
@@ -24,79 +40,84 @@ TARGET_2ND_CPU_ABI2 := armeabi
 TARGET_2ND_CPU_VARIANT := generic
 TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a55
 
-# APEX
 OVERRIDE_TARGET_FLATTEN_APEX := true
-
-# Bootloader
 TARGET_BOOTLOADER_BOARD_NAME := beryl
 TARGET_NO_BOOTLOADER := true
-
-# Display
 TARGET_SCREEN_DENSITY := 450
+TARGET_BOARD_PLATFORM := mt6855
 
-# Kernel
+# Stock beryl boot image parameters
 BOARD_BOOTIMG_HEADER_VERSION := 4
+BOARD_BOOT_HEADER_VERSION := 4
 BOARD_KERNEL_BASE := 0x3fff8000
 BOARD_KERNEL_CMDLINE := bootopt=64S3,32N2,64N2
 BOARD_KERNEL_PAGESIZE := 4096
 BOARD_RAMDISK_OFFSET := 0x26f08000
 BOARD_KERNEL_TAGS_OFFSET := 0x07c88000
+BOARD_DTB_OFFSET := 0x01f00000
 
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOTIMG_HEADER_VERSION)
+BOARD_MKBOOTIMG_ARGS += --base $(BOARD_KERNEL_BASE)
+BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
 BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
+BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
 
 BOARD_KERNEL_IMAGE_NAME := Image
+
+# Prebuilt stock kernel + DTB. The kernel was verified byte-for-byte
+# against the extracted stock boot.img during the device bring-up.
 TARGET_KERNEL_CONFIG := beryl_defconfig
 TARGET_KERNEL_SOURCE := kernel/xiaomi/beryl
-
-# Prebuilt stock kernel + DTB
 TARGET_FORCE_PREBUILT_KERNEL := true
+
 ifeq ($(TARGET_FORCE_PREBUILT_KERNEL),true)
 TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
 TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb.img
 BOARD_MKBOOTIMG_ARGS += --dtb $(TARGET_PREBUILT_DTB)
 endif
 
-# Partitions
+# Partition sizes
 BOARD_FLASH_BLOCK_SIZE := 262144
 BOARD_BOOTIMAGE_PARTITION_SIZE := 134217728
+BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864
+BOARD_INIT_BOOT_IMAGE_PARTITION_SIZE := 8388608
 BOARD_RECOVERYIMAGE_PARTITION_SIZE := 67108864
-BOARD_HAS_LARGE_FILESYSTEM := true
 
+# Filesystems
+BOARD_HAS_LARGE_FILESYSTEM := true
 BOARD_SYSTEMIMAGE_PARTITION_TYPE := ext4
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
-
+TARGET_USERIMAGES_USE_EXT4 := true
+TARGET_USERIMAGES_USE_F2FS := true
 TARGET_COPY_OUT_VENDOR := vendor
 
 # Dynamic partitions
 BOARD_SUPER_PARTITION_SIZE := 9126805504
 BOARD_SUPER_PARTITION_GROUPS := xiaomi_dynamic_partitions
-BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext product vendor vendor_dlkm odm odm_dlkm
+BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST := \
+    system \
+    system_ext \
+    product \
+    vendor \
+    vendor_dlkm \
+    odm \
+    odm_dlkm
 BOARD_XIAOMI_DYNAMIC_PARTITIONS_SIZE := 9122611200
-
-# Platform
-TARGET_BOARD_PLATFORM := mt6855
-
-# Recovery
-TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
-TARGET_USERIMAGES_USE_EXT4 := true
-TARGET_USERIMAGES_USE_F2FS := true
 
 # AVB
 BOARD_AVB_ENABLE := true
 BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 3
 
-# Development anti-rollback workaround
-PLATFORM_SECURITY_PATCH := 2099-12-31
-VENDOR_SECURITY_PATCH := 2099-12-31
-PLATFORM_VERSION := 16.1.0
-
-# OrangeFox
+# Recovery
+TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
 TW_THEME := portrait_hdpi
 TW_EXTRA_LANGUAGES := true
 TW_SCREEN_BLANK_ON_BOOT := true
 TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_USE_TOOLBOX := true
 TW_INCLUDE_REPACKTOOLS := true
+
+# Keep this bring-up focused on boot/display/touch. Do not enable FBE
+# or decryption assumptions here.

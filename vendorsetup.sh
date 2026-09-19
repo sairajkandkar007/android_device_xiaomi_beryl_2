@@ -1,24 +1,21 @@
 #!/bin/bash
+#
+# OrangeFox build settings for Xiaomi beryl
+#
 
 export FOX_BUILD_DEVICE="beryl"
-
-# A/B
 export FOX_AB_DEVICE=1
-
-# Virtual A/B
 export FOX_VIRTUAL_AB_DEVICE=1
-
-# Recovery is stored in vendor_boot
 export FOX_VENDOR_BOOT_RECOVERY=1
 
-# Allow missing Android dependencies
 export ALLOW_MISSING_DEPENDENCIES=true
-
-# Build environment
 export LC_ALL="C"
 
-# Use stock/prebuilt kernel
+# Stock kernel/DTB are supplied from device/xiaomi/beryl/prebuilt.
 export OF_FORCE_PREBUILT_KERNEL=1
 
-# Keymaster
-export OF_DEFAULT_KEYMASTER_VERSION=4.0
+# Stock device uses Keymaster 4.1 era interfaces.
+export OF_DEFAULT_KEYMASTER_VERSION=4.1
+
+# Bring-up target: do not attempt data decryption yet.
+export OF_DONT_PATCH_ENCRYPTED_DEVICE=1
