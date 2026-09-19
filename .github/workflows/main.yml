@@ -40,7 +40,8 @@ jobs:
 
       - name: Extract Kernel and DTB using Python
         run: |
-          wget -q https://raw.githubusercontent.com/aosp-mirror/platform_system_tools_mkbootimg/master/unpack_bootimg.py
+          # Download from the stable LineageOS mirror
+          wget -q https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-19.1/unpack_bootimg.py
           python3 unpack_bootimg.py --boot_img stock/boot.img --out unpacked/
 
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
@@ -48,7 +49,7 @@ jobs:
           
           [ -f unpacked/kernel ] && mv unpacked/kernel "$TREE_DIR/prebuilt/kernel"
           [ -f unpacked/dtb ] && mv unpacked/dtb "$TREE_DIR/prebuilt/dtb"
-
+          
       - name: Create vendorsetup.sh
         run: |
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
