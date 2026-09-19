@@ -38,27 +38,22 @@ jobs:
           mkdir -p output_tree
           python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
 
-    
       - name: Extract Kernel using Official Magisk
         run: |
-          # Download the specific Magisk v30.7 APK
           wget -qO magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
-          
-          # Extract the native Linux x86_64 binary hidden inside the APK
           unzip -p magisk.apk lib/x86_64/libmagiskboot.so > magiskboot
           chmod a+x magiskboot
           
-          # Unpack the boot image safely
-          ./magiskboot unpack stock/boot.img
+          # Adding "|| true" forces the workflow to continue even when magiskboot
+          # crashes on the Xiaomi VBMETA footer at the end of the file.
+          ./magiskboot unpack stock/boot.img || true
 
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           mkdir -p "$TREE_DIR/prebuilt"
           
-          # Move the extracted kernel to your tree
           [ -f kernel ] && mv kernel "$TREE_DIR/prebuilt/kernel"
           [ -f dtb ] && mv dtb "$TREE_DIR/prebuilt/dtb"
-          
-          
+
       - name: Create vendorsetup.sh
         run: |
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
@@ -76,7 +71,7 @@ jobs:
         run: |
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           cp -r $TREE_DIR/* ./
-          rm -rf stock output_tree unpacked unpack_bootimg.py
+          rm -rf stock output_tree magiskboot magisk.apk kernel dtb ramdisk*
           
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
