@@ -39,9 +39,9 @@ jobs:
           mkdir -p output_tree
           python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
 
-      - name: Extract Kernel and DTB
-        run: |
-          wget -q https://raw.githubusercontent.com/twrpdtgen/magiskboot-build/main/magiskboot
+            - name: Extract Kernel and DTB
+              run: |
+          curl -sL "https://github.com/cfig/magiskboot/releases/download/v27.0/magiskboot_x86_64" -o magiskboot
           chmod a+x magiskboot
           ./magiskboot unpack stock/boot.img
 
@@ -49,6 +49,7 @@ jobs:
           mkdir -p "$TREE_DIR/prebuilt"
           [ -f kernel ] && mv kernel "$TREE_DIR/prebuilt/kernel"
           [ -f dtb ] && mv dtb "$TREE_DIR/prebuilt/dtb"
+ 
 
             - name: Create vendorsetup.sh
               run: |
