@@ -1,10 +1,10 @@
-name: Generate Complete Device Tree
+name: Extract and Inject Touch Modules
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-clean-tree:
+  extract-modules:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -13,75 +13,55 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
+      - name: Install EROFS Utilities
         run: |
           sudo apt update
-          sudo apt install -y cpio liblzma-dev wget
-          pip install twrpdtgen
+          sudo apt install -y erofs-utils
 
-      - name: Download Stock Images from Previous Repo
+      - name: Download vendor_dlkm.img
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p stock
-          cd stock
-          gh release download "Berylstock" --pattern "vendor_boot.img" -R sairajkandkar007/android_device_xiaomi_beryl
-          gh release download "Berylstock" --pattern "boot.img" -R sairajkandkar007/android_device_xiaomi_beryl
+          # Fetch the vendor_dlkm image directly from your old repository's release
+          gh release download "Berylstock" --pattern "vendor_dlkm.img" -R sairajkandkar007/android_device_xiaomi_beryl
 
-      - name: Generate Scaffolding with twrpdtgen
+      - name: Extract EROFS Image
         run: |
-          mkdir -p output_tree
-          python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
+          mkdir -p vendor_dlkm_extracted
+          # fsck.erofs is the native tool for unpacking EROFS images
+          fsck.erofs --extract=vendor_dlkm_extracted vendor_dlkm.img
 
-      - name: Extract Kernel using Official Magisk
-        continue-on-error: true
+      - name: Stage Kernel Modules in Device Tree
         run: |
-          wget -qO magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
-          unzip -p magisk.apk lib/x86_64/libmagiskboot.so > magiskboot
-          chmod a+x magiskboot
-          
-          # Swallows the expected VBMETA crash
-          ./magiskboot unpack stock/boot.img || true
+          # Create the standard vendor module directory for OrangeFox
+          MODULES_DIR="recovery/root/vendor/lib/modules"
+          mkdir -p "$MODULES_DIR"
 
-          TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
-          mkdir -p "$TREE_DIR/prebuilt"
-          
-          # Proper if statements prevent "exit code 1" if the dtb file doesn't exist
-          if [ -f kernel ]; then 
-            mv kernel "$TREE_DIR/prebuilt/kernel"
-          fi
-          
-          if [ -f dtb ]; then 
-            mv dtb "$TREE_DIR/prebuilt/dtb"
-          fi
+          # Target touchscreen and dependency modules mapped in the handoff
+          TARGET_MODULES=(
+            "fts_touch_i2c.ko"
+            "xiaomi_tp.ko"
+            "lct_tp.ko"
+            "scp.ko"
+            "mtk-afe-external.ko"
+            "mtk_tinysys_ipi.ko"
+            "mtk_rpmsg_mbox.ko"
+            "mtk-mbox.ko"
+          )
 
-      - name: Create vendorsetup.sh
+          # Find and copy each required module into the recovery tree
+          for mod in "${TARGET_MODULES[@]}"; do
+            find vendor_dlkm_extracted -type f -name "$mod" -exec cp {} "$MODULES_DIR/" \;
+            echo "Copied $mod"
+          done
+
+      - name: Commit Modules to Repository
         run: |
-          TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
-          {
-            echo 'export FOX_BUILD_DEVICE="beryl"'
-            echo 'export FOX_AB_DEVICE=1'
-            echo 'export FOX_VIRTUAL_AB_DEVICE=1'
-            echo 'export ALLOW_MISSING_DEPENDENCIES=true'
-            echo 'export LC_ALL="C"'
-            echo 'export OF_FORCE_PREBUILT_KERNEL=1'
-            echo 'export OF_DEFAULT_KEYMASTER_VERSION=4.1'
-          } > "$TREE_DIR/vendorsetup.sh"
-
-      - name: Commit Complete Tree to New Repository
-        run: |
-          TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
-          cp -r $TREE_DIR/* ./
-          rm -rf stock output_tree magiskboot magisk.apk kernel dtb ramdisk*
+          # Clean up the heavy extraction folders before committing
+          rm -rf vendor_dlkm_extracted vendor_dlkm.img
           
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Initial commit: Generated complete OrangeFox device tree" || echo "No changes to commit"
+          git add recovery/root/vendor/lib/modules/
+          git commit -m "Inject stock touchscreen kernel modules" || echo "No changes to commit"
           git push
-          
