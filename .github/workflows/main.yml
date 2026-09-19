@@ -30,7 +30,6 @@ jobs:
         run: |
           mkdir -p stock
           cd stock
-          # Pulling images from your old repo
           gh release download "Berylstock" --pattern "vendor_boot.img" -R sairajkandkar007/android_device_xiaomi_beryl
           gh release download "Berylstock" --pattern "boot.img" -R sairajkandkar007/android_device_xiaomi_beryl
 
@@ -39,26 +38,19 @@ jobs:
           mkdir -p output_tree
           python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
 
-            
       - name: Extract Kernel and DTB using Python
         run: |
-          # Download Google's official unpack script
           wget -q https://raw.githubusercontent.com/aosp-mirror/platform_system_tools_mkbootimg/master/unpack_bootimg.py
-          
-          # Run the python unpacker on your stock boot image
           python3 unpack_bootimg.py --boot_img stock/boot.img --out unpacked/
 
-          # Locate target device tree folder
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           mkdir -p "$TREE_DIR/prebuilt"
           
-          # Move the extracted kernel and dtb to prebuilt
           [ -f unpacked/kernel ] && mv unpacked/kernel "$TREE_DIR/prebuilt/kernel"
           [ -f unpacked/dtb ] && mv unpacked/dtb "$TREE_DIR/prebuilt/dtb"
-          
 
-            - name: Create vendorsetup.sh
-              run: |
+      - name: Create vendorsetup.sh
+        run: |
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           {
             echo 'export FOX_BUILD_DEVICE="beryl"'
@@ -69,13 +61,12 @@ jobs:
             echo 'export OF_FORCE_PREBUILT_KERNEL=1'
             echo 'export OF_DEFAULT_KEYMASTER_VERSION=4.1'
           } > "$TREE_DIR/vendorsetup.sh"
-          
 
       - name: Commit Complete Tree to New Repository
         run: |
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           cp -r $TREE_DIR/* ./
-          rm -rf stock output_tree magiskboot ramdisk*
+          rm -rf stock output_tree unpacked unpack_bootimg.py
           
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
