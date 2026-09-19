@@ -39,20 +39,26 @@ jobs:
           python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
 
       - name: Extract Kernel using Official Magisk
+        continue-on-error: true
         run: |
           wget -qO magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
           unzip -p magisk.apk lib/x86_64/libmagiskboot.so > magiskboot
           chmod a+x magiskboot
           
-          # Adding "|| true" forces the workflow to continue even when magiskboot
-          # crashes on the Xiaomi VBMETA footer at the end of the file.
+          # Swallows the expected VBMETA crash
           ./magiskboot unpack stock/boot.img || true
 
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           mkdir -p "$TREE_DIR/prebuilt"
           
-          [ -f kernel ] && mv kernel "$TREE_DIR/prebuilt/kernel"
-          [ -f dtb ] && mv dtb "$TREE_DIR/prebuilt/dtb"
+          # Proper if statements prevent "exit code 1" if the dtb file doesn't exist
+          if [ -f kernel ]; then 
+            mv kernel "$TREE_DIR/prebuilt/kernel"
+          fi
+          
+          if [ -f dtb ]; then 
+            mv dtb "$TREE_DIR/prebuilt/dtb"
+          fi
 
       - name: Create vendorsetup.sh
         run: |
@@ -78,3 +84,4 @@ jobs:
           git add -A
           git commit -m "Initial commit: Generated complete OrangeFox device tree" || echo "No changes to commit"
           git push
+          
