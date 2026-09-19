@@ -1,0 +1,3 @@
+# Soft dependencies extracted from modules themselves.
+softdep sspm_v3 pre: tinysys-scmi.ko
+softdep cmdq_sec_drv pre: gz_main_mod.ko gz_trusty_mod.ko gz_irq_mod.ko gz_virtio_mod.ko gz_ipc_mod.ko gz_tz_system.ko
