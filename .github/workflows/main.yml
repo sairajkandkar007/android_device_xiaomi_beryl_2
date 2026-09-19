@@ -39,17 +39,23 @@ jobs:
           mkdir -p output_tree
           python3 -m twrpdtgen stock/vendor_boot.img --output output_tree/
 
-            - name: Extract Kernel and DTB
-              run: |
-          curl -sL "https://github.com/cfig/magiskboot/releases/download/v27.0/magiskboot_x86_64" -o magiskboot
-          chmod a+x magiskboot
-          ./magiskboot unpack stock/boot.img
+            
+      - name: Extract Kernel and DTB using Python
+        run: |
+          # Download Google's official unpack script
+          wget -q https://raw.githubusercontent.com/aosp-mirror/platform_system_tools_mkbootimg/master/unpack_bootimg.py
+          
+          # Run the python unpacker on your stock boot image
+          python3 unpack_bootimg.py --boot_img stock/boot.img --out unpacked/
 
+          # Locate target device tree folder
           TREE_DIR=$(find output_tree -mindepth 2 -maxdepth 2 -type d | head -n 1)
           mkdir -p "$TREE_DIR/prebuilt"
-          [ -f kernel ] && mv kernel "$TREE_DIR/prebuilt/kernel"
-          [ -f dtb ] && mv dtb "$TREE_DIR/prebuilt/dtb"
- 
+          
+          # Move the extracted kernel and dtb to prebuilt
+          [ -f unpacked/kernel ] && mv unpacked/kernel "$TREE_DIR/prebuilt/kernel"
+          [ -f unpacked/dtb ] && mv unpacked/dtb "$TREE_DIR/prebuilt/dtb"
+          
 
             - name: Create vendorsetup.sh
               run: |
