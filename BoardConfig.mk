@@ -1,6 +1,6 @@
 #
 # OrangeFox device configuration for Xiaomi/Redmi beryl
-# Target: vendor_boot recovery, boot-only bring-up
+# Target: vendor_boot recovery, boot/display/touch bring-up
 #
 
 DEVICE_PATH := device/xiaomi/beryl
@@ -26,6 +26,7 @@ BOARD_MOVE_GSI_AVB_KEYS_TO_VENDOR_BOOT := true
 BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT := true
 BOARD_USES_GENERIC_KERNEL_IMAGE := true
 
+# Architecture
 TARGET_ARCH := arm64
 TARGET_ARCH_VARIANT := armv8-a
 TARGET_CPU_ABI := arm64-v8a
@@ -65,8 +66,7 @@ BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
 
 BOARD_KERNEL_IMAGE_NAME := Image
 
-# Prebuilt stock kernel + DTB. The kernel was verified byte-for-byte
-# against the extracted stock boot.img during the device bring-up.
+# Verified stock prebuilt kernel + DTB
 TARGET_KERNEL_CONFIG := beryl_defconfig
 TARGET_KERNEL_SOURCE := kernel/xiaomi/beryl
 TARGET_FORCE_PREBUILT_KERNEL := true
@@ -93,7 +93,7 @@ TARGET_USERIMAGES_USE_EXT4 := true
 TARGET_USERIMAGES_USE_F2FS := true
 TARGET_COPY_OUT_VENDOR := vendor
 
-# Dynamic partitions
+# Stock dynamic partition layout
 BOARD_SUPER_PARTITION_SIZE := 9126805504
 BOARD_SUPER_PARTITION_GROUPS := xiaomi_dynamic_partitions
 BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST := \
@@ -112,6 +112,7 @@ BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 3
 
 # Recovery
 TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
+TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery.fstab
 TW_THEME := portrait_hdpi
 TW_EXTRA_LANGUAGES := true
 TW_SCREEN_BLANK_ON_BOOT := true
@@ -119,5 +120,4 @@ TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_USE_TOOLBOX := true
 TW_INCLUDE_REPACKTOOLS := true
 
-# Keep this bring-up focused on boot/display/touch. Do not enable FBE
-# or decryption assumptions here.
+# No FBE/decryption configuration for this bring-up.

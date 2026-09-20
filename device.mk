@@ -7,7 +7,7 @@ AB_OTA_POSTINSTALL_CONFIG += \
     FILESYSTEM_TYPE_system=ext4 \
     POSTINSTALL_OPTIONAL_system=true
 
-# Boot control HAL and Update tools
+# Boot control HAL and update tools
 PRODUCT_PACKAGES += \
     android.hardware.boot@1.0-impl \
     android.hardware.boot@1.0-service \
@@ -22,15 +22,15 @@ PRODUCT_PACKAGES += \
 BOARD_ROOT_EXTRA_SYMLINKS += \
     /vendor/firmware:/vendor/odm/firmware
 
-# Stock touch modules
+# Stock touch modules; order follows the verified vendor_dlkm dependency chain.
 TW_LOAD_VENDOR_MODULES := \
-    fts_touch_i2c.ko \
-    lct_tp.ko \
-    xiaomi_tp.ko \
+    mtk-mbox.ko \
+    mtk_rpmsg_mbox.ko \
+    mtk_tinysys_ipi.ko \
     scp.ko \
     mtk-afe-external.ko \
-    mtk_tinysys_ipi.ko \
-    mtk_rpmsg_mbox.ko \
-    mtk-mbox.ko
+    xiaomi_tp.ko \
+    lct_tp.ko \
+    fts_touch_i2c.ko
 
 TW_LOAD_VENDOR_BOOT_MODULES := true

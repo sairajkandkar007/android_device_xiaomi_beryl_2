@@ -1,7 +1,4 @@
 # AndroidProducts.mk
-#
-# OrangeFox/TWRP-style product definition for beryl.
-
 PRODUCT_MAKEFILES := \
     $(LOCAL_DIR)/twrp_beryl.mk
 
