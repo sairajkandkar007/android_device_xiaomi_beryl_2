@@ -1,7 +1,11 @@
+# AndroidProducts.mk
+#
+# OrangeFox/TWRP-style product definition for beryl.
+
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/omni_beryl.mk
+    $(LOCAL_DIR)/twrp_beryl.mk
 
 COMMON_LUNCH_CHOICES := \
-    omni_beryl-eng \
-    omni_beryl-userdebug \
-    omni_beryl-user
+    twrp_beryl-user \
+    twrp_beryl-userdebug \
+    twrp_beryl-eng
