@@ -26,7 +26,6 @@ BOARD_MOVE_GSI_AVB_KEYS_TO_VENDOR_BOOT := true
 BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT := true
 BOARD_USES_GENERIC_KERNEL_IMAGE := true
 
-# Architecture
 TARGET_ARCH := arm64
 TARGET_ARCH_VARIANT := armv8-a
 TARGET_CPU_ABI := arm64-v8a
@@ -66,7 +65,7 @@ BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
 
 BOARD_KERNEL_IMAGE_NAME := Image
 
-# Verified stock prebuilt kernel + DTB
+# Verified stock kernel + DTB.
 TARGET_KERNEL_CONFIG := beryl_defconfig
 TARGET_KERNEL_SOURCE := kernel/xiaomi/beryl
 TARGET_FORCE_PREBUILT_KERNEL := true
@@ -93,7 +92,7 @@ TARGET_USERIMAGES_USE_EXT4 := true
 TARGET_USERIMAGES_USE_F2FS := true
 TARGET_COPY_OUT_VENDOR := vendor
 
-# Stock dynamic partition layout
+# Dynamic partitions
 BOARD_SUPER_PARTITION_SIZE := 9126805504
 BOARD_SUPER_PARTITION_GROUPS := xiaomi_dynamic_partitions
 BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST := \
@@ -112,7 +111,6 @@ BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 3
 
 # Recovery
 TARGET_RECOVERY_PIXEL_FORMAT := BGRA_8888
-TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery.fstab
 TW_THEME := portrait_hdpi
 TW_EXTRA_LANGUAGES := true
 TW_SCREEN_BLANK_ON_BOOT := true
@@ -120,4 +118,5 @@ TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_USE_TOOLBOX := true
 TW_INCLUDE_REPACKTOOLS := true
 
-# No FBE/decryption configuration for this bring-up.
+# Boot/display/touch bring-up only.
+# FBE/decryption is intentionally not enabled here.
