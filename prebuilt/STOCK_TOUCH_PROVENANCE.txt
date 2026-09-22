@@ -1,0 +1,31 @@
+Beryl stock touch provenance
+============================
+ROM version: OS1.0.4.0.UOQINXM
+ROM filename: miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+Repository: sairajkandkar007/android_device_xiaomi_beryl_2
+
+Required stock modules:
+fts_touch_i2c.ko
+lct_tp.ko
+mtk-afe-external.ko
+mtk-mbox.ko
+mtk_rpmsg_mbox.ko
+mtk_tinysys_ipi.ko
+scp.ko
+xiaomi_tp.ko
+
+Required stock firmware:
+Conf_MultipleTest_ft3519t.ini
+focaltech_ts_fw_samsung_ft3519t.bin
+
+SHA256:
+1b2fe92ce147dfdd8e7bbdc8a0be9f38b3b420f3663ccdd9cbf6120a1914e907  prebuilt/modules/fts_touch_i2c.ko
+e050e1c7251752f7c1ee4fce42c7aaf9b33bd1b747da7b2ce14f0c89a49d7b6c  prebuilt/modules/lct_tp.ko
+a9eb6c483f38a81d736a69df13036757ecb0c3f19a61a562b92e1c436cbc075e  prebuilt/modules/mtk-afe-external.ko
+219b9fadac0fe2fe9481e262e7946da290b2e1be09652bb428fab0130c627fd0  prebuilt/modules/mtk-mbox.ko
+d17976fea22b3b3e650cae47717edc996173f71c4c642bda9d9e2c0b9d3b0a32  prebuilt/modules/mtk_rpmsg_mbox.ko
+df00a038381ae5ee3320c6b718a6781c19508617e116cc6fda72e21d8db1e2fe  prebuilt/modules/mtk_tinysys_ipi.ko
+eb63cdb7d75338265161e0cd36d59a2a53ad10691dc93c550d37111652ddd513  prebuilt/modules/scp.ko
+7c21dc31841b8834287f56f35acd0ca0d55a8e38a603563cfaa4c89e8e40d5fd  prebuilt/modules/xiaomi_tp.ko
+0b235a4f6a98198aa634333aca489772242cb4f585f4dffbd69ec8120f31f71b  prebuilt/firmware/Conf_MultipleTest_ft3519t.ini
+0541650eda7c86a0ba8f5f9d7fc8d8a8194a97f1d195be504df2a5f8f0fcd5d1  prebuilt/firmware/focaltech_ts_fw_samsung_ft3519t.bin
