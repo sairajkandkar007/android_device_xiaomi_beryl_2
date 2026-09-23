@@ -1,0 +1,1056 @@
+name: Analyze Stock FBE KeyMint Dependencies
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+
+    env:
+      ROM_VERSION: "OS1.0.4.0.UOQINXM"
+      ROM_FILENAME: "miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
+
+    steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. INSTALL REQUIRED TOOLS
+      # ============================================================
+      - name: Install required tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            aria2 \
+            unzip \
+            zip \
+            p7zip-full \
+            file \
+            lz4 \
+            cpio \
+            e2fsprogs \
+            erofs-utils \
+            android-sdk-libsparse-utils \
+            binutils \
+            grep \
+            sed \
+            jq \
+            python3 \
+            python3-pip
+
+          echo "===== TOOLS ====="
+
+          python3 --version
+          aria2c --version | head -1
+          unzip -v | head -1
+          awk --version | head -1
+
+
+      # ============================================================
+      # 3. INSTALL PAYLOAD DUMPER
+      # ============================================================
+      - name: Install android-payload-dumper
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 -m pip install --upgrade pip
+
+          python3 -m pip install \
+            android-payload-dumper==2.3.0
+
+          python3 -m payload_dumper --version || true
+          payload-dumper --version || true
+
+
+      # ============================================================
+      # 4. PREPARE WORKSPACE
+      # ============================================================
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf work
+
+          mkdir -p \
+            work/download \
+            work/rom \
+            work/payload \
+            work/partitions \
+            work/extracted \
+            work/analysis \
+            work/logs
+
+
+      # ============================================================
+      # 5. PREPARE ROM URLS
+      # ============================================================
+      - name: Prepare ROM URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > work/cdn_urls.txt <<EOF
+          https://bn.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}
+          https://bigota.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}
+          EOF
+
+          cat work/cdn_urls.txt
+
+
+      # ============================================================
+      # 6. BENCHMARK XIAOMI CDNS
+      # ============================================================
+      - name: Benchmark Xiaomi CDNs
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          : > work/cdn_benchmark.txt
+
+          while IFS= read -r URL; do
+
+            echo "Testing:"
+            echo "$URL"
+
+            RESULT=$(
+              curl -L \
+                --connect-timeout 15 \
+                --max-time 30 \
+                -r 0-10485759 \
+                -o /dev/null \
+                -sS \
+                -w "%{http_code} %{speed_download}\n" \
+                "$URL" 2>/dev/null
+            ) || RESULT="000 0"
+
+            CODE=$(echo "$RESULT" | awk '{print $1}')
+            SPEED=$(echo "$RESULT" | awk '{print $2}')
+
+            echo "$SPEED $CODE $URL" \
+              | tee -a work/cdn_benchmark.txt
+
+          done < work/cdn_urls.txt
+
+          cat work/cdn_benchmark.txt
+
+
+      # ============================================================
+      # 7. SELECT FASTEST CDN
+      # ============================================================
+      - name: Select fastest CDN
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BEST_URL=$(
+            awk '
+              $2 ~ /^2/ && $1 > 0 {
+                print $1 "|" $3
+              }
+            ' work/cdn_benchmark.txt |
+            sort -nr |
+            head -1 |
+            cut -d'|' -f2-
+          )
+
+          if [ -z "$BEST_URL" ]; then
+            echo "No working Xiaomi CDN found."
+            cat work/cdn_benchmark.txt
+            exit 1
+          fi
+
+          echo "Selected CDN:"
+          echo "$BEST_URL"
+
+          echo "ROM_URL=$BEST_URL" >> "$GITHUB_ENV"
+
+
+      # ============================================================
+      # 8. DOWNLOAD STOCK ROM
+      # ============================================================
+      - name: Download stock ROM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aria2c \
+            --file-allocation=none \
+            --continue=true \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=10M \
+            --max-tries=10 \
+            --retry-wait=5 \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --dir=work/download \
+            --out="$ROM_FILENAME" \
+            "$ROM_URL"
+
+          ls -lh "work/download/$ROM_FILENAME"
+
+
+      # ============================================================
+      # 9. VERIFY ROM
+      # ============================================================
+      - name: Verify downloaded ROM
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROM="work/download/$ROM_FILENAME"
+
+          test -f "$ROM"
+          test -s "$ROM"
+
+          file "$ROM"
+
+          sha256sum "$ROM" \
+            | tee work/logs/rom.sha256
+
+          unzip -t "$ROM" \
+            | tee work/logs/zip_test.txt
+
+
+      # ============================================================
+      # 10. EXTRACT ROM ARCHIVE
+      # ============================================================
+      - name: Extract ROM archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROM="work/download/$ROM_FILENAME"
+
+          rm -rf work/rom
+          mkdir -p work/rom
+
+          unzip -q "$ROM" \
+            -d work/rom
+
+
+      # ============================================================
+      # 11. FIND PAYLOAD.BIN
+      # ============================================================
+      - name: Extract payload.bin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t PAYLOADS < <(
+            find work/rom \
+              -type f \
+              -name "payload.bin" \
+              -print
+          )
+
+          if [ "${#PAYLOADS[@]}" -eq 0 ]; then
+            echo "ERROR: payload.bin was not found."
+
+            find work/rom \
+              -type f \
+              -iname "*payload*" \
+              -print \
+              || true
+
+            exit 1
+          fi
+
+          PAYLOAD="${PAYLOADS[0]}"
+
+          echo "Found payload:"
+          echo "$PAYLOAD"
+
+          cp "$PAYLOAD" \
+            work/payload/payload.bin
+
+          test -s work/payload/payload.bin
+
+          ls -lh work/payload/payload.bin
+          file work/payload/payload.bin
+
+          sha256sum work/payload/payload.bin \
+            | tee work/logs/payload.sha256
+
+
+      # ============================================================
+      # 12. LIST PAYLOAD
+      # ============================================================
+      - name: List payload partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m payload_dumper \
+            work/payload/payload.bin \
+            -l \
+            | tee work/logs/payload_partitions.txt
+
+
+      # ============================================================
+      # 13. EXTRACT STOCK PARTITIONS
+      #
+      # KEEPING THE WORKING PAYLOAD LOGIC
+      # ============================================================
+      - name: Extract stock partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/partitions
+
+          python3 -m payload_dumper \
+            work/payload/payload.bin \
+            -o work/partitions \
+            -p \
+              vendor \
+              vendor_dlkm \
+              odm_dlkm \
+              system \
+              system_ext \
+              product \
+              init_boot \
+              boot \
+              dtbo \
+              vendor_boot \
+              vbmeta \
+              vbmeta_system \
+              vbmeta_vendor \
+            -j 8
+
+          find work/partitions \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f %s bytes\n' \
+            | sort
+
+
+      # ============================================================
+      # 14. EXTRACT EROFS
+      # ============================================================
+      - name: Extract EROFS partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for PART in \
+            vendor \
+            vendor_dlkm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product
+          do
+
+            IMG="work/partitions/${PART}.img"
+            OUT="work/extracted/${PART}"
+
+            if [ ! -f "$IMG" ]; then
+              continue
+            fi
+
+            if ! file "$IMG" | grep -qi "EROFS"; then
+              continue
+            fi
+
+            echo "Extracting EROFS: $PART"
+
+            mkdir -p "$OUT"
+
+            fsck.erofs \
+              --extract="$PWD/$OUT" \
+              "$IMG" \
+              2>&1 \
+              | tee "work/logs/${PART}_erofs.log"
+
+          done
+
+
+      # ============================================================
+      # 15. EXTRACT EXT4 IF PRESENT
+      # ============================================================
+      - name: Extract EXT4 partitions
+        shell: bash
+        run: |
+          set -u
+
+          for PART in \
+            vendor \
+            vendor_dlkm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product
+          do
+
+            IMG="work/partitions/${PART}.img"
+            OUT="work/extracted/${PART}"
+
+            if [ ! -f "$IMG" ]; then
+              continue
+            fi
+
+            if file "$IMG" | grep -qi "ext4 filesystem"; then
+
+              echo "Extracting EXT4: $PART"
+
+              mkdir -p "$OUT"
+
+              debugfs \
+                -R "rdump / $PWD/$OUT" \
+                "$IMG" \
+                > "work/logs/${PART}_debugfs.log" 2>&1 \
+                || true
+
+            fi
+
+          done
+
+
+      # ============================================================
+      # 16. INVENTORY IMPORTANT STOCK FILES
+      # ============================================================
+      - name: Inventory FBE KeyMint files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find work/extracted \
+            -type f \
+            \( \
+              -name "vold" \
+              -name "keystore2" \
+              -o -iname "*keymint*" \
+              -o -iname "*keymaster*" \
+              -o -iname "*gatekeeper*" \
+              -o -iname "*trustonic*" \
+              -o -iname "*mitee*" \
+              -o -iname "*tee*" \
+              -o -name "fstab*" \
+              -o -name "*.rc" \
+              -o -name "*.xml" \
+            \) \
+            -print \
+            | sort \
+            > work/analysis/security_file_inventory.txt
+
+          cat work/analysis/security_file_inventory.txt
+
+
+      # ============================================================
+      # 17. FSTAB / FBE CONFIGURATION
+      # ============================================================
+      - name: Extract FBE configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "============================================================"
+            echo "FBE CONFIGURATION"
+            echo "============================================================"
+
+            echo
+            echo "### FSTAB FILES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name "fstab*" \
+                -o -iname "*fstab*" \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### FBE REFERENCES"
+
+            grep -RniE \
+              'fileencryption|metadata_encryption|keydirectory|inlinecrypt|fsverity|fscrypt' \
+              work/extracted \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "### VOLD REFERENCES"
+
+            grep -RniE \
+              'vold|keystore2|keymint|keymaster' \
+              work/extracted/vendor/etc \
+              work/extracted/system/etc \
+              work/extracted/system_ext/etc \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > work/analysis/fbe_config.txt
+
+          cat work/analysis/fbe_config.txt
+
+
+      # ============================================================
+      # 18. FIND VOLD DEPENDENCIES
+      # ============================================================
+      - name: Analyze vold binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VOLD="work/extracted/system/system/bin/vold"
+
+          if [ ! -f "$VOLD" ]; then
+            VOLD=$(find work/extracted \
+              -type f \
+              -name "vold" \
+              | head -1)
+          fi
+
+          if [ -z "$VOLD" ] || [ ! -f "$VOLD" ]; then
+            echo "vold not found"
+            exit 0
+          fi
+
+          {
+            echo "============================================================"
+            echo "VOLD"
+            echo "============================================================"
+
+            echo
+            echo "PATH:"
+            echo "$VOLD"
+
+            echo
+            echo "FILE:"
+            file "$VOLD"
+
+            echo
+            echo "### NEEDED LIBRARIES"
+
+            readelf -d "$VOLD" 2>/dev/null |
+              grep NEEDED \
+              || true
+
+            echo
+            echo "### FBE STRINGS"
+
+            strings "$VOLD" |
+              grep -iE \
+              'fscrypt|keymint|keymaster|keystore|metadata|inlinecrypt|cryptfs|fbe' \
+              | sort -u \
+              || true
+
+          } > work/analysis/vold_dependencies.txt
+
+          cat work/analysis/vold_dependencies.txt
+
+
+      # ============================================================
+      # 19. FIND KEYMINT SERVICES
+      # ============================================================
+      - name: Analyze KeyMint services
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/keymint_services.txt"
+
+          {
+            echo "============================================================"
+            echo "KEYMINT SERVICES"
+            echo "============================================================"
+
+            echo
+            echo "### EXECUTABLES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name "*keymint*" \
+                -o -name "*keymaster*" \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### SERVICE RC FILES"
+
+            grep -RniE \
+              'keymint|keymaster' \
+              work/extracted \
+              --include="*.rc" \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "### VINTF"
+
+            grep -RniE \
+              'keymint|keymaster' \
+              work/extracted \
+              --include="*.xml" \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 20. MAP KEYMINT ELF DEPENDENCIES
+      # ============================================================
+      - name: Map KeyMint ELF dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/keymint_elf_dependencies.txt"
+
+          {
+            echo "============================================================"
+            echo "KEYMINT ELF DEPENDENCY MAP"
+            echo "============================================================"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name "*keymint*" \
+                -o -name "*keymaster*" \
+                -o -name "*gatekeeper*" \
+              \) \
+              -print0 |
+            while IFS= read -r -d '' F; do
+
+              echo
+              echo "------------------------------------------------------------"
+              echo "$F"
+              echo "------------------------------------------------------------"
+
+              file "$F" || true
+
+              echo
+              echo "NEEDED:"
+
+              readelf -d "$F" 2>/dev/null |
+                grep NEEDED \
+                || true
+
+            done
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 21. MAP SECURITY LIBRARIES
+      # ============================================================
+      - name: Find security libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/security_libraries.txt"
+
+          {
+            echo "============================================================"
+            echo "SECURITY LIBRARIES"
+            echo "============================================================"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -iname "*keymint*.so" \
+                -o -iname "*keymaster*.so" \
+                -o -iname "*gatekeeper*.so" \
+                -iname "*trustonic*.so" \
+                -o -iname "*mitee*.so" \
+                -o -iname "*tee*.so" \
+              \) \
+              -print \
+              | sort
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 22. MAP TEE / MTEE DEVICE REQUIREMENTS
+      # ============================================================
+      - name: Analyze TEE device requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/tee_device_requirements.txt"
+
+          {
+            echo "============================================================"
+            echo "TEE / MTEE DEVICE REQUIREMENTS"
+            echo "============================================================"
+
+            echo
+            echo "### SECURITY DEVICE REFERENCES"
+
+            grep -RniE \
+              'mitee|teei|mobicore|trusty|tkcore|tee_device|tee_control|keymaster_device|ut_keymaster' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "### SECURITY MODULES"
+
+            find work/extracted \
+              -type f \
+              -name "*.ko" \
+              -print0 |
+            while IFS= read -r -d '' F; do
+
+              strings "$F" 2>/dev/null |
+                grep -qiE \
+                'tee|mitee|mobicore|trustonic|keymaster|keymint' \
+                && echo "$F"
+
+            done
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 23. SELINUX RULES REQUIRED BY KEYMINT / VOLD
+      # ============================================================
+      - name: Analyze security SELinux rules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/security_selinux.txt"
+
+          {
+            echo "============================================================"
+            echo "SECURITY SELINUX RULES"
+            echo "============================================================"
+
+            echo
+            echo "### KEYMINT"
+
+            grep -RniE \
+              'hal_keymint|keymint_default|keymint.*device|keymint.*file|keymint.*service' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "### KEYMASTER"
+
+            grep -RniE \
+              'hal_keymaster|keymaster_default|keymaster.*device|keymaster.*file|keymaster.*service' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "### GATEKEEPER"
+
+            grep -RniE \
+              'hal_gatekeeper|gatekeeper_default|gatekeeper.*device|gatekeeper.*file|gatekeeper.*service' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "### VOLD"
+
+            grep -RniE \
+              'vold_.*(keymint|keymaster|gatekeeper|tee|metadata|fscrypt)|vold.*(keymint|keymaster|tee|metadata)' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 24. SEARCH KEY STORAGE / METADATA PATHS
+      # ============================================================
+      - name: Analyze key storage paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/key_storage_paths.txt"
+
+          {
+            echo "============================================================"
+            echo "KEY STORAGE / METADATA PATHS"
+            echo "============================================================"
+
+            grep -RniE \
+              '/metadata|metadata_encryption|user_keys|secdiscardable|key_install|persist.*key|keymint.*persist' \
+              work/extracted \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 25. ANALYZE KERNEL SUPPORT
+      # ============================================================
+      - name: Analyze kernel FBE support
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/kernel_fbe_support.txt"
+
+          {
+            echo "============================================================"
+            echo "KERNEL FBE SUPPORT"
+            echo "============================================================"
+
+            echo
+            echo "### VENDOR_DLKM MODULES"
+
+            find work/extracted/vendor_dlkm \
+              -type f \
+              -name "*.ko" \
+              -print \
+              2>/dev/null \
+              | sort
+
+            echo
+            echo "### FBE / FSCRYPT MODULE STRINGS"
+
+            find work/extracted/vendor_dlkm \
+              -type f \
+              -name "*.ko" \
+              -print0 \
+              2>/dev/null |
+            while IFS= read -r -d '' F; do
+
+              strings "$F" 2>/dev/null |
+                grep -qiE \
+                'fscrypt|dm-default-key|inlinecrypt|f2fs' \
+                && echo "$F"
+
+            done
+
+            echo
+            echo "### FBE KERNEL REFERENCES"
+
+            grep -RniE \
+              'fscrypt|inlinecrypt|dm-default-key|f2fs' \
+              work/extracted/vendor_dlkm \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 26. SEARCH INIT BOOT CONFIGURATION
+      # ============================================================
+      - name: Analyze init and boot configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/init_boot_security.txt"
+
+          {
+            echo "============================================================"
+            echo "INIT / BOOT SECURITY CONFIGURATION"
+            echo "============================================================"
+
+            echo
+            echo "### INIT RC SECURITY REFERENCES"
+
+            grep -RniE \
+              'keymint|keymaster|gatekeeper|vold|keystore2|tee|fscrypt|metadata|post-fs-data|early_hal' \
+              work/extracted \
+              --include="*.rc" \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "### PROPERTY REFERENCES"
+
+            grep -RniE \
+              'ro\.crypto|ro\.security|keymint|keymaster|fscrypt|vold' \
+              work/extracted \
+              --include="*.prop" \
+              --include="build.prop" \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 27. GENERATE DEPENDENCY SUMMARY
+      # ============================================================
+      - name: Generate dependency summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="work/analysis/DECRYPTION_DEPENDENCY_SUMMARY.txt"
+
+          {
+            echo "============================================================"
+            echo "BERYL STOCK DECRYPTION DEPENDENCY ANALYSIS"
+            echo "============================================================"
+            echo
+            echo "ROM: $ROM_VERSION"
+            echo
+            echo "This report identifies stock components required by"
+            echo "the FBE/KeyMint/vold chain."
+            echo
+
+            echo "============================================================"
+            echo "1. FBE"
+            echo "============================================================"
+            cat work/analysis/fbe_config.txt
+
+            echo
+            echo "============================================================"
+            echo "2. VOLD"
+            echo "============================================================"
+            cat work/analysis/vold_dependencies.txt
+
+            echo
+            echo "============================================================"
+            echo "3. KEYMINT SERVICES"
+            echo "============================================================"
+            cat work/analysis/keymint_services.txt
+
+            echo
+            echo "============================================================"
+            echo "4. KEYMINT ELF DEPENDENCIES"
+            echo "============================================================"
+            cat work/analysis/keymint_elf_dependencies.txt
+
+            echo
+            echo "============================================================"
+            echo "5. SECURITY LIBRARIES"
+            echo "============================================================"
+            cat work/analysis/security_libraries.txt
+
+            echo
+            echo "============================================================"
+            echo "6. TEE / MTEE"
+            echo "============================================================"
+            cat work/analysis/tee_device_requirements.txt
+
+            echo
+            echo "============================================================"
+            echo "7. SELINUX"
+            echo "============================================================"
+            cat work/analysis/security_selinux.txt
+
+            echo
+            echo "============================================================"
+            echo "8. KEY STORAGE"
+            echo "============================================================"
+            cat work/analysis/key_storage_paths.txt
+
+            echo
+            echo "============================================================"
+            echo "9. KERNEL"
+            echo "============================================================"
+            cat work/analysis/kernel_fbe_support.txt
+
+            echo
+            echo "============================================================"
+            echo "10. INIT / BOOT"
+            echo "============================================================"
+            cat work/analysis/init_boot_security.txt
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 28. PACKAGE RESULTS
+      # ============================================================
+      - name: Package results
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/result
+
+          cp -a \
+            work/analysis \
+            work/logs \
+            work/result/
+
+          tar -czf \
+            beryl-stock-decryption-dependencies.tar.gz \
+            -C work/result .
+
+          ls -lh beryl-stock-decryption-dependencies.tar.gz
+
+
+      # ============================================================
+      # 29. UPLOAD RESULTS
+      # ============================================================
+      - name: Upload dependency analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: beryl-stock-decryption-dependencies
+          path: |
+            beryl-stock-decryption-dependencies.tar.gz
+            work/analysis/DECRYPTION_DEPENDENCY_SUMMARY.txt
+            work/analysis/vold_dependencies.txt
+            work/analysis/keymint_services.txt
+            work/analysis/keymint_elf_dependencies.txt
+            work/analysis/security_libraries.txt
+            work/analysis/tee_device_requirements.txt
+            work/analysis/security_selinux.txt
+            work/analysis/key_storage_paths.txt
+            work/analysis/kernel_fbe_support.txt
+            work/analysis/init_boot_security.txt
+          if-no-files-found: error
+          retention-days: 14
