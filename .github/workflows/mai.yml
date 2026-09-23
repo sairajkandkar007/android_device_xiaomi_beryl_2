@@ -1082,11 +1082,11 @@ jobs:
           cat "$OUT"
 
 
-      # ============================================================
-      # 29. PACKAGE ANALYSIS
-      # ============================================================
+    # ============================================================
+    # 29. PACKAGE ONLY ANALYSIS REPORTS
+    # ============================================================
 
-      - name: Package analysis
+      - name: Package analysis reports
         shell: bash
         run: |
           set -e
@@ -1099,20 +1099,28 @@ jobs:
           cp -a work/logs \
             work/package/
 
-          cp -a work/partitions \
-            work/package/
+          echo "Analysis package contents:"
+          find work/package \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort
+
+          echo
+          echo "Package size:"
+          du -sh work/package
 
           tar -czf \
             work/beryl-stock-fbe-keymint-analysis.tar.gz \
             -C work/package \
-            analysis logs partitions
+            analysis logs
 
-          ls -lh \
-            work/beryl-stock-fbe-keymint-analysis.tar.gz
+          echo
+          echo "Final report archive:"
+          ls -lh work/beryl-stock-fbe-keymint-analysis.tar.gz
 
 
       # ============================================================
-      # 30. UPLOAD ANALYSIS ARTIFACT
+      # 30. UPLOAD ONLY SMALL ANALYSIS ARTIFACT
       # ============================================================
 
       - name: Upload analysis artifact
