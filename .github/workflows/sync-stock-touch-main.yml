@@ -17,65 +17,79 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. BASIC SETUP
+      # 1. CHECKOUT
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # ============================================================
+      # 2. INSTALL REQUIRED TOOLS
+      # ============================================================
       - name: Install required tools
+        shell: bash
         run: |
           set -euxo pipefail
 
           sudo apt-get update
 
           sudo apt-get install -y \
-          aria2 \
-          unzip \
-          zip \
-          p7zip-full \
-          file \
-          lz4 \
-          cpio \
-          e2fsprogs \
-          erofs-utils \
-          android-sdk-libsparse-utils \
-          binutils \
-          grep \
-          sed \
-          jq \
-          python3 \
-          python3-pip
+            aria2 \
+            unzip \
+            zip \
+            p7zip-full \
+            file \
+            lz4 \
+            cpio \
+            e2fsprogs \
+            erofs-utils \
+            android-sdk-libsparse-utils \
+            binutils \
+            grep \
+            sed \
+            jq \
+            python3 \
+            python3-pip
 
+          echo "===== TOOL VERSIONS ====="
           python3 --version
-          aria2c --version
-          file --version
-          extract.erofs --help | head -20 || true
+          aria2c --version | head -1
+          unzip -v | head -1
+          file --version | head -1
+          awk --version | head -1 || true
 
 
       # ============================================================
-      # 2. INSTALL PAYLOAD DUMPER
+      # 3. INSTALL PAYLOAD DUMPER
       # ============================================================
       - name: Install android-payload-dumper
+        shell: bash
         run: |
           set -euxo pipefail
 
           python3 -m pip install --upgrade pip
-          python3 -m pip install --upgrade android-payload-dumper==2.3.0
+          python3 -m pip install --upgrade \
+            android-payload-dumper==2.3.0
+
+          echo "===== PAYLOAD DUMPER ====="
 
           python3 -m payload_dumper --version || true
           payload-dumper --version || true
 
 
       # ============================================================
-      # 3. CREATE WORK DIRECTORIES
+      # 4. PREPARE WORKSPACE
       # ============================================================
       - name: Prepare workspace
+        shell: bash
         run: |
           set -euxo pipefail
 
           rm -rf work
+
           mkdir -p \
             work/download \
+            work/rom \
             work/payload \
             work/partitions \
             work/extracted \
@@ -84,11 +98,12 @@ jobs:
 
 
       # ============================================================
-      # 4. BUILD MIUI CDN URLS
+      # 5. PREPARE ROM URLS
       # ============================================================
       - name: Prepare ROM URLs
+        shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           cat > work/cdn_urls.txt <<EOF
           https://bn.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}
@@ -99,7 +114,7 @@ jobs:
 
 
       # ============================================================
-      # 5. BENCHMARK MIUI CDNS
+      # 6. BENCHMARK XIAOMI CDNS
       # ============================================================
       - name: Benchmark Xiaomi CDNs
         shell: bash
@@ -109,7 +124,9 @@ jobs:
           : > work/cdn_benchmark.txt
 
           while IFS= read -r URL; do
-            echo "Testing: $URL"
+
+            echo "Testing:"
+            echo "$URL"
 
             RESULT=$(
               curl -L \
@@ -125,17 +142,18 @@ jobs:
             CODE=$(echo "$RESULT" | awk '{print $1}')
             SPEED=$(echo "$RESULT" | awk '{print $2}')
 
-            echo "$SPEED $CODE $URL" | tee -a work/cdn_benchmark.txt
+            echo "$SPEED $CODE $URL" \
+              | tee -a work/cdn_benchmark.txt
 
           done < work/cdn_urls.txt
 
           echo
           echo "===== CDN BENCHMARK ====="
-          sort -nr work/cdn_benchmark.txt || true
+          cat work/cdn_benchmark.txt
 
 
       # ============================================================
-      # 6. SELECT FASTEST WORKING CDN
+      # 7. SELECT FASTEST CDN
       # ============================================================
       - name: Select fastest CDN
         shell: bash
@@ -143,15 +161,18 @@ jobs:
           set -euo pipefail
 
           BEST_URL=$(
-            awk '$2 ~ /^2/ && $1 > 0 {print $1 " " $3}' \
-              work/cdn_benchmark.txt |
+            awk '
+              $2 ~ /^2/ && $1 > 0 {
+                print $1 "|" $3
+              }
+            ' work/cdn_benchmark.txt |
             sort -nr |
             head -1 |
-            cut -d' ' -f2-
+            cut -d'|' -f2-
           )
 
           if [ -z "$BEST_URL" ]; then
-            echo "No working Xiaomi CDN was found."
+            echo "No working CDN found."
             cat work/cdn_benchmark.txt
             exit 1
           fi
@@ -163,14 +184,12 @@ jobs:
 
 
       # ============================================================
-      # 7. DOWNLOAD FULL STOCK ROM
+      # 8. DOWNLOAD STOCK ROM
       # ============================================================
       - name: Download stock ROM
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p work/download
 
           aria2c \
             --file-allocation=none \
@@ -186,13 +205,14 @@ jobs:
             --out="$ROM_FILENAME" \
             "$ROM_URL"
 
-          ls -lh work/download/
+          ls -lh "work/download/$ROM_FILENAME"
 
 
       # ============================================================
-      # 8. VERIFY ZIP
+      # 9. VERIFY DOWNLOADED ROM
       # ============================================================
       - name: Verify downloaded ROM
+        shell: bash
         run: |
           set -euxo pipefail
 
@@ -202,31 +222,89 @@ jobs:
           test -s "$ROM"
 
           file "$ROM"
-          sha256sum "$ROM" | tee work/logs/rom.sha256
 
-          unzip -t "$ROM" > work/logs/zip_test.txt
+          sha256sum "$ROM" \
+            | tee work/logs/rom.sha256
 
-          tail -5 work/logs/zip_test.txt
+          unzip -t "$ROM" \
+            | tee work/logs/zip_test.txt
+
+          echo "ROM verification complete."
 
 
       # ============================================================
-      # 9. EXTRACT PAYLOAD.BIN
+      # 10. EXTRACT ROM ZIP
+      #
+      # IMPORTANT:
+      # We deliberately extract the ZIP first and then locate
+      # payload.bin.
+      #
+      # This restores the previous payload handling logic instead
+      # of assuming payload.bin is at the ZIP root.
       # ============================================================
-      - name: Extract payload.bin
+      - name: Extract ROM archive
         shell: bash
         run: |
           set -euo pipefail
 
           ROM="work/download/$ROM_FILENAME"
 
-          unzip -l "$ROM" | grep -E '(^|/)payload\.bin$' || {
-            echo "payload.bin was not found in the ROM."
-            exit 1
-          }
+          rm -rf work/rom
+          mkdir -p work/rom
 
-          unzip -p "$ROM" payload.bin > work/payload/payload.bin
+          unzip -q "$ROM" \
+            -d work/rom
+
+          echo "===== ROM CONTENTS ====="
+
+          find work/rom \
+            -maxdepth 3 \
+            -type f \
+            | sort \
+            | head -200
+
+
+      # ============================================================
+      # 11. LOCATE PAYLOAD.BIN
+      # ============================================================
+      - name: Extract payload.bin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== SEARCHING FOR PAYLOAD.BIN ====="
+
+          mapfile -t PAYLOADS < <(
+            find work/rom \
+              -type f \
+              -name "payload.bin" \
+              -print
+          )
+
+          if [ "${#PAYLOADS[@]}" -eq 0 ]; then
+            echo "ERROR: payload.bin was not found."
+            echo
+            echo "Files containing payload in their name:"
+            find work/rom \
+              -type f \
+              -iname "*payload*" \
+              -print \
+              || true
+            exit 1
+          fi
+
+          echo "Found payload.bin:"
+          printf '%s\n' "${PAYLOADS[@]}"
+
+          PAYLOAD="${PAYLOADS[0]}"
+
+          cp "$PAYLOAD" \
+            work/payload/payload.bin
 
           test -s work/payload/payload.bin
+
+          echo
+          echo "===== PAYLOAD ====="
 
           ls -lh work/payload/payload.bin
           file work/payload/payload.bin
@@ -236,7 +314,10 @@ jobs:
 
 
       # ============================================================
-      # 10. LIST PAYLOAD PARTITIONS
+      # 12. LIST PAYLOAD CONTENTS
+      #
+      # Diagnostic only.
+      # It does NOT control extraction.
       # ============================================================
       - name: List payload partitions
         shell: bash
@@ -246,99 +327,55 @@ jobs:
           python3 -m payload_dumper \
             work/payload/payload.bin \
             -l \
-            > work/logs/payload_partitions.txt
-
-          cat work/logs/payload_partitions.txt
+            | tee work/logs/payload_partitions.txt
 
 
       # ============================================================
-      # 11. SELECT ONLY PARTITIONS ACTUALLY PRESENT
-      # ============================================================
-      - name: Select available analysis partitions
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          declare -a REQUESTED=(
-            vendor
-            vendor_dlkm
-            odm
-            odm_dlkm
-            system
-            system_ext
-            product
-            system_dlkm
-            init_boot
-            boot
-            dtbo
-            vendor_boot
-            vbmeta
-            vbmeta_system
-            vbmeta_vendor
-          )
-
-          : > work/logs/selected_partitions.txt
-          : > work/logs/missing_partitions.txt
-
-          for PART in "${REQUESTED[@]}"; do
-            if grep -Eq "│[[:space:]]*$PART[[:space:]]*│" \
-              work/logs/payload_partitions.txt; then
-
-              echo "$PART" | tee -a work/logs/selected_partitions.txt
-
-            else
-
-              echo "$PART" | tee -a work/logs/missing_partitions.txt
-
-            fi
-          done
-
-          echo
-          echo "===== AVAILABLE ====="
-          cat work/logs/selected_partitions.txt
-
-          echo
-          echo "===== MISSING ====="
-          cat work/logs/missing_partitions.txt || true
-
-          if [ ! -s work/logs/selected_partitions.txt ]; then
-            echo "No requested partitions were found."
-            exit 1
-          fi
-
-
-      # ============================================================
-      # 12. EXTRACT STOCK PARTITIONS
+      # 13. EXTRACT STOCK PARTITIONS
+      #
+      # ORIGINAL / KNOWN PAYLOAD LOGIC
+      #
+      # No dynamic partition selection.
+      # No JSON parsing.
+      # No awk used here.
       # ============================================================
       - name: Extract stock partitions
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t PARTITIONS < work/logs/selected_partitions.txt
-
-          echo "Extracting:"
-          printf '  %s\n' "${PARTITIONS[@]}"
+          mkdir -p work/partitions
 
           python3 -m payload_dumper \
             work/payload/payload.bin \
             -o work/partitions \
-            -p "${PARTITIONS[@]}" \
+            -p \
+              vendor \
+              vendor_dlkm \
+              system \
+              system_ext \
+              product \
+              system_dlkm \
+              init_boot \
+              boot \
+              dtbo \
+              vbmeta \
+              vbmeta_system \
+              vbmeta_vendor \
             -j 8
 
           echo
-          echo "===== EXTRACTED IMAGES ====="
+          echo "===== EXTRACTED PARTITIONS ====="
 
           find work/partitions \
             -maxdepth 1 \
             -type f \
-            -name '*.img' \
             -printf '%f %s bytes\n' \
             | sort
 
 
       # ============================================================
-      # 13. IDENTIFY FILESYSTEM TYPES
+      # 14. IDENTIFY FILESYSTEM TYPES
       # ============================================================
       - name: Identify partition filesystems
         shell: bash
@@ -348,6 +385,7 @@ jobs:
           : > work/logs/filesystems.txt
 
           for IMG in work/partitions/*.img; do
+
             [ -f "$IMG" ] || continue
 
             echo "===== $(basename "$IMG") =====" \
@@ -358,18 +396,21 @@ jobs:
 
             echo \
               | tee -a work/logs/filesystems.txt
+
           done
+
+          cat work/logs/filesystems.txt
 
 
       # ============================================================
-      # 14. EXTRACT EROFS FILESYSTEMS
+      # 15. EXTRACT EROFS PARTITIONS
       # ============================================================
       - name: Extract EROFS partitions
         shell: bash
         run: |
           set -u
 
-          for IMG in \
+          for PART in \
             vendor \
             vendor_dlkm \
             odm \
@@ -380,47 +421,41 @@ jobs:
             system_dlkm
           do
 
-            SRC="work/partitions/${IMG}.img"
+            IMG="work/partitions/${PART}.img"
 
-            if [ ! -f "$SRC" ]; then
+            if [ ! -f "$IMG" ]; then
               continue
             fi
 
-            if file "$SRC" | grep -qi "EROFS"; then
+            if file "$IMG" | grep -qi "EROFS"; then
 
-              echo "Extracting EROFS: $IMG"
+              echo "Extracting EROFS: $PART"
 
-              mkdir -p "work/extracted/$IMG"
+              mkdir -p "work/extracted/$PART"
 
               extract.erofs \
-                -i "$SRC" \
-                -x \
-                -T0 \
-                -f \
-                -o "$PWD/work/extracted/$IMG" \
-                > "work/logs/${IMG}_extract.log" 2>&1 \
+                -i "$IMG" \
+                -o "work/extracted/$PART" \
+                > "work/logs/${PART}_erofs.log" 2>&1 \
                 || {
-                  echo "EROFS extraction failed for $IMG"
-                  cat "work/logs/${IMG}_extract.log"
+                  echo "EROFS extraction failed: $PART"
+                  cat "work/logs/${PART}_erofs.log"
                 }
 
-            else
-
-              echo "Skipping $IMG: not detected as EROFS"
-
             fi
+
           done
 
 
       # ============================================================
-      # 15. EXTRACT EXT4 FILESYSTEMS IF PRESENT
+      # 16. EXTRACT EXT4 PARTITIONS
       # ============================================================
       - name: Extract EXT4 partitions
         shell: bash
         run: |
           set -u
 
-          for IMG in \
+          for PART in \
             vendor \
             vendor_dlkm \
             odm \
@@ -431,75 +466,34 @@ jobs:
             system_dlkm
           do
 
-            SRC="work/partitions/${IMG}.img"
+            IMG="work/partitions/${PART}.img"
 
-            if [ ! -f "$SRC" ]; then
+            if [ ! -f "$IMG" ]; then
               continue
             fi
 
-            if file "$SRC" | grep -qiE "ext4 filesystem"; then
+            if file "$IMG" | grep -qi "ext4 filesystem"; then
 
-              echo "Extracting EXT4: $IMG"
+              echo "Extracting EXT4: $PART"
 
-              mkdir -p "work/extracted/$IMG"
+              mkdir -p "work/extracted/$PART"
 
               debugfs \
-                -R "rdump / $PWD/work/extracted/$IMG" \
-                "$SRC" \
-                > "work/logs/${IMG}_debugfs.log" 2>&1 \
+                -R "rdump / $PWD/work/extracted/$PART" \
+                "$IMG" \
+                > "work/logs/${PART}_debugfs.log" 2>&1 \
                 || {
-                  echo "EXT4 extraction failed for $IMG"
-                  cat "work/logs/${IMG}_debugfs.log"
+                  echo "EXT4 extraction failed: $PART"
+                  cat "work/logs/${PART}_debugfs.log"
                 }
 
             fi
+
           done
 
 
       # ============================================================
-      # 16. EXTRACT VENDOR_BOOT RAMDISK
-      # ============================================================
-      - name: Analyze vendor_boot
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMG="work/partitions/vendor_boot.img"
-
-          if [ ! -f "$IMG" ]; then
-            echo "vendor_boot.img not present in payload."
-            exit 0
-          fi
-
-          file "$IMG" | tee work/logs/vendor_boot.file.txt
-
-          mkdir -p work/extracted/vendor_boot
-
-
-          # Try Android boot image tools if available.
-          if command -v unpack_bootimg >/dev/null 2>&1; then
-
-            unpack_bootimg \
-              --boot_img="$IMG" \
-              --out=work/extracted/vendor_boot \
-              > work/logs/vendor_boot_unpack.txt 2>&1 \
-              || true
-
-          fi
-
-
-          find work/extracted/vendor_boot \
-            -maxdepth 2 \
-            -type f \
-            -printf '%p\n' \
-            | sort \
-            > work/logs/vendor_boot_files.txt
-
-          cat work/logs/vendor_boot_files.txt || true
-
-
-      # ============================================================
-      # 17. SEARCH FBE CONFIGURATION
+      # 17. FBE CONFIGURATION
       # ============================================================
       - name: Analyze FBE configuration
         shell: bash
@@ -509,49 +503,50 @@ jobs:
           OUT="work/analysis/fbe_configuration.txt"
 
           {
-            echo "=========================================="
-            echo "STOCK FBE CONFIGURATION ANALYSIS"
-            echo "Device: POCO M7 Pro 5G / beryl"
+            echo "============================================================"
+            echo "STOCK FBE CONFIGURATION"
+            echo "============================================================"
+            echo
             echo "ROM: $ROM_VERSION"
-            echo "=========================================="
             echo
 
             echo "### FSTAB FILES"
             find work/extracted \
               -type f \
-              \( -iname 'fstab*' -o -iname '*fstab*' \) \
+              \( \
+                -iname "fstab*" \
+                -o -iname "*fstab*" \
+              \) \
               -print \
               | sort
 
             echo
             echo "### FSTAB CONTENT"
+
             find work/extracted \
               -type f \
-              \( -iname 'fstab*' -o -iname '*fstab*' \) \
+              \( \
+                -iname "fstab*" \
+                -o -iname "*fstab*" \
+              \) \
               -print0 |
             while IFS= read -r -d '' F; do
+
               echo
               echo "----- $F -----"
               cat "$F"
+
             done
 
             echo
-            echo "### FBE / FILEENCRYPTION REFERENCES"
+            echo "### FBE REFERENCES"
+
             grep -RniE \
-              'fileencryption|metadata_encryption|keydirectory|wrappedkey|keyref|fscrypt|inlinecrypt|emmc_optimized|f2fs' \
+              'fileencryption|metadata_encryption|keydirectory|wrappedkey|fscrypt|inlinecrypt|f2fs|cryptfs' \
               work/extracted \
               2>/dev/null \
-              | head -1000 || true
-
-            echo
-            echo "### METADATA REFERENCES"
-            grep -RniE \
-              'metadata' \
-              work/extracted/vendor/etc \
-              work/extracted/system/etc \
-              work/extracted/system_ext/etc \
-              2>/dev/null \
-              | head -500 || true
+              | head -3000 \
+              || true
 
           } > "$OUT"
 
@@ -559,7 +554,7 @@ jobs:
 
 
       # ============================================================
-      # 18. ANALYZE VOLD
+      # 18. VOLD / FSCRYPT
       # ============================================================
       - name: Analyze vold and fscrypt
         shell: bash
@@ -569,41 +564,32 @@ jobs:
           OUT="work/analysis/vold_fscrypt.txt"
 
           {
-            echo "=========================================="
-            echo "VOLD / FSCRYPT ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "VOLD / FSCRYPT"
+            echo "============================================================"
 
             echo
-            echo "### VOLD BINARIES"
+            echo "### VOLD / FSCRYPT FILES"
 
             find work/extracted \
               -type f \
               \( \
-                -name 'vold' \
-                -o -name '*fscrypt*' \
-                -o -name '*cryptfs*' \
+                -name "vold" \
+                -o -iname "*fscrypt*" \
+                -o -iname "*cryptfs*" \
               \) \
               -print \
               | sort
 
             echo
-            echo "### VOLD STRINGS"
+            echo "### REFERENCES"
 
-            while IFS= read -r F; do
-              echo
-              echo "----- $F -----"
-
-              strings "$F" 2>/dev/null |
-                grep -iE \
-                'fscrypt|fileencryption|metadata|keymaster|keymint|gatekeeper|wrapped|inlinecrypt|fbe|cryptfs' \
-                | head -500 || true
-
-            done < <(
-              find work/extracted \
-                -type f \
-                \( -name 'vold' -o -name '*fscrypt*' \) \
-                -print
-            )
+            grep -RniE \
+              'fscrypt|fileencryption|metadata|keymaster|keymint|gatekeeper|wrapped|inlinecrypt|fbe|cryptfs' \
+              work/extracted \
+              2>/dev/null \
+              | head -3000 \
+              || true
 
           } > "$OUT"
 
@@ -611,7 +597,7 @@ jobs:
 
 
       # ============================================================
-      # 19. FIND KEYMINT / KEYMASTER / GATEKEEPER
+      # 19. KEYMINT / KEYMASTER / GATEKEEPER
       # ============================================================
       - name: Analyze KeyMint stack
         shell: bash
@@ -621,47 +607,34 @@ jobs:
           OUT="work/analysis/keymint.txt"
 
           {
-            echo "=========================================="
-            echo "KEYMINT / KEYMASTER / GATEKEEPER ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "KEYMINT / KEYMASTER / GATEKEEPER"
+            echo "============================================================"
 
             echo
-            echo "### POSSIBLE KEYMINT FILES"
+            echo "### FILES"
 
             find work/extracted \
               -type f \
               \( \
-                -iname '*keymint*' \
-                -o -iname '*keymaster*' \
-                -o -iname '*gatekeeper*' \
-                -o -iname '*secure*element*' \
-                -o -iname '*weaver*' \
+                -iname "*keymint*" \
+                -o -iname "*keymaster*" \
+                -o -iname "*gatekeeper*" \
+                -o -iname "*weaver*" \
+                -o -iname "*secure*element*" \
               \) \
               -print \
               | sort
 
             echo
-            echo "### KEYMINT REFERENCES"
+            echo "### REFERENCES"
 
             grep -RniE \
               'android\.hardware\.security\.keymint|keymint|keymaster|gatekeeper|weaver' \
               work/extracted \
               2>/dev/null \
-              | head -2000 || true
-
-            echo
-            echo "### KEYMINT BINARIES AND LIBRARIES"
-
-            find work/extracted \
-              -type f \
-              \( \
-                -name 'android.hardware.security.keymint*' \
-                -o -name '*keymint*.so' \
-                -o -name '*keymaster*.so' \
-                -o -name '*gatekeeper*.so' \
-              \) \
-              -print \
-              | sort
+              | head -3000 \
+              || true
 
           } > "$OUT"
 
@@ -669,7 +642,7 @@ jobs:
 
 
       # ============================================================
-      # 20. ANALYZE INIT SERVICES
+      # 20. KEYMINT INIT SERVICES
       # ============================================================
       - name: Analyze crypto init services
         shell: bash
@@ -679,17 +652,18 @@ jobs:
           OUT="work/analysis/init_crypto_services.txt"
 
           {
-            echo "=========================================="
-            echo "CRYPTO / KEYMINT INIT SERVICES"
-            echo "=========================================="
+            echo "============================================================"
+            echo "CRYPTO INIT SERVICES"
+            echo "============================================================"
 
             grep -RniE \
-              'keymint|keymaster|gatekeeper|vold|cryptfs|fscrypt|keystore2|tee|trustonic|trusty' \
+              'keymint|keymaster|gatekeeper|vold|cryptfs|fscrypt|keystore2|tee|trusty' \
               work/extracted \
-              --include='*.rc' \
-              --include='*.xml' \
+              --include="*.rc" \
+              --include="*.xml" \
               2>/dev/null \
-              | head -3000 || true
+              | head -5000 \
+              || true
 
           } > "$OUT"
 
@@ -697,7 +671,7 @@ jobs:
 
 
       # ============================================================
-      # 21. ANALYZE VINTF HAL DECLARATIONS
+      # 21. VINTF SECURITY HALS
       # ============================================================
       - name: Analyze security HALs
         shell: bash
@@ -707,16 +681,19 @@ jobs:
           OUT="work/analysis/security_hal_vintf.txt"
 
           {
-            echo "=========================================="
-            echo "SECURITY HAL / VINTF ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "SECURITY HAL / VINTF"
+            echo "============================================================"
+
+            echo
+            echo "### VINTF FILES"
 
             find work/extracted \
               -type f \
               \( \
-                -name '*manifest*.xml' \
-                -o -name '*matrix*.xml' \
-                -o -path '*/etc/vintf/*' \
+                -name "*manifest*.xml" \
+                -o -name "*matrix*.xml" \
+                -o -path "*/etc/vintf/*" \
               \) \
               -print \
               | sort
@@ -727,9 +704,10 @@ jobs:
             grep -RniE \
               'keymint|keymaster|gatekeeper|weaver|secure_element' \
               work/extracted \
-              --include='*.xml' \
+              --include="*.xml" \
               2>/dev/null \
-              | head -3000 || true
+              | head -3000 \
+              || true
 
           } > "$OUT"
 
@@ -737,7 +715,7 @@ jobs:
 
 
       # ============================================================
-      # 22. ANALYZE SECURITY PROPERTIES
+      # 22. SECURITY PROPERTIES
       # ============================================================
       - name: Analyze security properties
         shell: bash
@@ -747,15 +725,15 @@ jobs:
           OUT="work/analysis/security_properties.txt"
 
           {
-            echo "=========================================="
-            echo "SECURITY / FBE PROPERTIES"
-            echo "=========================================="
+            echo "============================================================"
+            echo "SECURITY PROPERTIES"
+            echo "============================================================"
 
             find work/extracted \
               -type f \
               \( \
-                -name 'build.prop' \
-                -o -name '*.prop' \
+                -name "build.prop" \
+                -o -name "*.prop" \
               \) \
               -print0 |
             while IFS= read -r -d '' F; do
@@ -764,7 +742,7 @@ jobs:
               echo "----- $F -----"
 
               grep -E \
-                'ro\.crypto|ro\.security|ro\.boot\.verifiedboot|ro\.build\.version|keymint|keymaster|fscrypt|fbe|vold' \
+                'ro\.crypto|ro\.security|ro\.boot\.verifiedboot|keymint|keymaster|fscrypt|fbe|vold' \
                 "$F" \
                 2>/dev/null \
                 || true
@@ -777,7 +755,7 @@ jobs:
 
 
       # ============================================================
-      # 23. ANALYZE CRYPTO LIBRARIES
+      # 23. CRYPTO LIBRARIES
       # ============================================================
       - name: Analyze crypto libraries
         shell: bash
@@ -787,31 +765,31 @@ jobs:
           OUT="work/analysis/crypto_libraries.txt"
 
           {
-            echo "=========================================="
-            echo "CRYPTO LIBRARY ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "CRYPTO LIBRARIES"
+            echo "============================================================"
 
             find work/extracted \
               -type f \
               \( \
-                -name 'libcrypto*' \
-                -o -name 'libkeymaster*' \
-                -o -name 'libkeymint*' \
-                -o -name '*keystore*.so' \
-                -o -name '*fscrypt*.so' \
+                -name "libcrypto*" \
+                -o -name "libkeymaster*" \
+                -o -name "libkeymint*" \
+                -o -iname "*keystore*.so" \
+                -o -iname "*fscrypt*.so" \
               \) \
               -print \
               | sort
 
             echo
-            echo "### SYMBOL / STRING REFERENCES"
+            echo "### STRINGS"
 
             find work/extracted \
               -type f \
               \( \
-                -name 'libkeymaster*' \
-                -o -name 'libkeymint*' \
-                -o -name '*keystore*.so' \
+                -name "libkeymaster*" \
+                -o -name "libkeymint*" \
+                -o -iname "*keystore*.so" \
               \) \
               -print0 |
             while IFS= read -r -d '' F; do
@@ -821,8 +799,9 @@ jobs:
 
               strings "$F" 2>/dev/null |
                 grep -iE \
-                'keymint|keymaster|keystore|secure|fscrypt|crypto|hardware' \
-                | head -300 || true
+                  'keymint|keymaster|keystore|secure|fscrypt|crypto|hardware' \
+                | head -500 \
+                || true
 
             done
 
@@ -832,9 +811,9 @@ jobs:
 
 
       # ============================================================
-      # 24. ANALYZE SELINUX SECURITY LABELS
+      # 24. SELINUX
       # ============================================================
-      - name: Analyze SELinux security files
+      - name: Analyze SELinux security
         shell: bash
         run: |
           set -u
@@ -842,30 +821,31 @@ jobs:
           OUT="work/analysis/selinux_security.txt"
 
           {
-            echo "=========================================="
-            echo "SELINUX SECURITY ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "SELINUX SECURITY"
+            echo "============================================================"
 
             find work/extracted \
               -type f \
               \( \
-                -name 'file_contexts*' \
-                -o -name '*sepolicy*' \
-                -o -name 'property_contexts' \
-                -o -name 'service_contexts' \
+                -name "file_contexts*" \
+                -o -name "*sepolicy*" \
+                -o -name "property_contexts" \
+                -o -name "service_contexts" \
               \) \
               -print \
               | sort
 
             echo
-            echo "### KEYMINT / VOLD SELINUX REFERENCES"
+            echo "### SECURITY REFERENCES"
 
             grep -RniE \
               'keymint|keymaster|gatekeeper|vold|keystore|metadata' \
               work/extracted \
-              --include='*context*' \
+              --include="*context*" \
               2>/dev/null \
-              | head -2000 || true
+              | head -3000 \
+              || true
 
           } > "$OUT"
 
@@ -873,7 +853,7 @@ jobs:
 
 
       # ============================================================
-      # 25. ANALYZE VENDOR_DLKM
+      # 25. VENDOR_DLKM
       # ============================================================
       - name: Analyze vendor_dlkm
         shell: bash
@@ -883,18 +863,18 @@ jobs:
           OUT="work/analysis/vendor_dlkm.txt"
 
           {
-            echo "=========================================="
-            echo "VENDOR_DLKM ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "VENDOR_DLKM"
+            echo "============================================================"
 
             if [ -d work/extracted/vendor_dlkm ]; then
 
               echo
-              echo "### MODULES"
+              echo "### KERNEL MODULES"
 
               find work/extracted/vendor_dlkm \
                 -type f \
-                -name '*.ko' \
+                -name "*.ko" \
                 -print \
                 | sort
 
@@ -903,7 +883,7 @@ jobs:
 
               find work/extracted/vendor_dlkm \
                 -type f \
-                -name 'modules.load*' \
+                -name "modules.load*" \
                 -print0 |
               while IFS= read -r -d '' F; do
                 echo
@@ -916,7 +896,7 @@ jobs:
 
               find work/extracted/vendor_dlkm \
                 -type f \
-                -name 'modules.dep*' \
+                -name "modules.dep*" \
                 -print0 |
               while IFS= read -r -d '' F; do
                 echo
@@ -932,9 +912,9 @@ jobs:
 
 
       # ============================================================
-      # 26. FIND FIRMWARE / TEE MATERIAL
+      # 26. FIRMWARE / TEE
       # ============================================================
-      - name: Analyze firmware and TEE references
+      - name: Analyze firmware and TEE
         shell: bash
         run: |
           set -u
@@ -942,35 +922,35 @@ jobs:
           OUT="work/analysis/firmware_tee.txt"
 
           {
-            echo "=========================================="
-            echo "FIRMWARE / TEE ANALYSIS"
-            echo "=========================================="
+            echo "============================================================"
+            echo "FIRMWARE / TEE"
+            echo "============================================================"
 
             echo
-            echo "### SECURITY-RELATED FIRMWARE"
+            echo "### SECURITY-RELATED FILES"
 
             find work/extracted \
               -type f \
               \( \
-                -iname '*keymint*' \
-                -o -iname '*keymaster*' \
-                -o -iname '*trusty*' \
-                -o -iname '*tee*' \
-                -o -iname '*tz*' \
-                -o -iname '*km*' \
+                -iname "*keymint*" \
+                -o -iname "*keymaster*" \
+                -o -iname "*trusty*" \
+                -iname "*tee*" \
+                -o -iname "*tz*" \
+                -o -iname "*weaver*" \
               \) \
               -print \
               | sort
 
             echo
-            echo "### FIRMWARE DIRECTORIES"
+            echo "### SECURITY DIRECTORIES"
 
             find work/extracted \
               -type d \
               \( \
-                -path '*/firmware*' \
-                -o -path '*/tee*' \
-                -o -path '*/trusty*' \
+                -iname "*firmware*" \
+                -o -iname "*tee*" \
+                -o -iname "*trusty*" \
               \) \
               -print \
               | sort
@@ -981,7 +961,7 @@ jobs:
 
 
       # ============================================================
-      # 27. CREATE MACHINE-READABLE FILE INVENTORY
+      # 27. COMPLETE FILE INVENTORY
       # ============================================================
       - name: Create file inventory
         shell: bash
@@ -1005,7 +985,7 @@ jobs:
       # ============================================================
       # 28. GENERATE FINAL SUMMARY
       # ============================================================
-      - name: Generate FBE analysis summary
+      - name: Generate final FBE KeyMint summary
         shell: bash
         run: |
           set -euo pipefail
@@ -1018,16 +998,20 @@ jobs:
             echo "STOCK FBE + KEYMINT ANALYSIS"
             echo "============================================================"
             echo
-            echo "ROM_VERSION : $ROM_VERSION"
-            echo "ROM_FILENAME: $ROM_FILENAME"
+            echo "ROM VERSION : $ROM_VERSION"
+            echo "ROM FILE    : $ROM_FILENAME"
+            echo
+
+            echo "============================================================"
+            echo "PAYLOAD"
+            echo "============================================================"
+            cat work/logs/payload.sha256
+
             echo
             echo "============================================================"
-            echo "PARTITIONS"
+            echo "PAYLOAD PARTITIONS"
             echo "============================================================"
-            cat work/logs/selected_partitions.txt
-            echo
-            echo "Missing requested partitions:"
-            cat work/logs/missing_partitions.txt || true
+            cat work/logs/payload_partitions.txt
 
             echo
             echo "============================================================"
@@ -1095,7 +1079,7 @@ jobs:
 
 
       # ============================================================
-      # 29. PACKAGE ANALYSIS
+      # 29. PACKAGE RESULTS
       # ============================================================
       - name: Package analysis results
         shell: bash
@@ -1104,18 +1088,7 @@ jobs:
 
           mkdir -p work/result
 
-          cp -a work/analysis \
-            work/logs \
-            work/result/
-
-          cp work/logs/payload_partitions.txt \
-            work/result/
-
-          cp work/logs/selected_partitions.txt \
-            work/result/
-
-          cp work/logs/missing_partitions.txt \
-            work/result/
+          cp -a work/analysis work/logs work/result/
 
           tar -czf \
             stock-fbe-keymint-analysis.tar.gz \
@@ -1134,8 +1107,7 @@ jobs:
           path: |
             stock-fbe-keymint-analysis.tar.gz
             work/analysis/FBE_KEYMINT_SUMMARY.txt
+            work/logs/payload.sha256
             work/logs/payload_partitions.txt
-            work/logs/selected_partitions.txt
-            work/logs/missing_partitions.txt
           if-no-files-found: error
           retention-days: 14
