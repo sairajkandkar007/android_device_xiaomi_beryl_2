@@ -33,10 +33,6 @@ jobs:
           fetch-depth: 0
 
 
-      # ============================================================
-      # INSTALL TOOLS
-      # ============================================================
-
       - name: Install tools
         shell: bash
         run: |
@@ -63,12 +59,21 @@ jobs:
             --no-cache-dir \
             payload-dumper
 
-          echo "payload-dumper:"
+          echo
+          echo "payload-dumper installed:"
           command -v payload-dumper
 
+          echo
+          echo "payload-dumper version:"
+          payload-dumper --version || true
+
+          echo
           echo "fsck.erofs:"
           command -v fsck.erofs
 
+          echo
+          echo "aria2:"
+          command -v aria2c
 
       # ============================================================
       # FIND FASTEST XIAOMI CDN
