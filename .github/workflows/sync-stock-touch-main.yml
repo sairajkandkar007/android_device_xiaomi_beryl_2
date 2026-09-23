@@ -1,285 +1,244 @@
-name: Beryl Stock FBE KeyMint Analysis
+name: Analyze Stock FBE KeyMint Stack
 
 on:
   workflow_dispatch:
-    inputs:
-      ROM_VERSION:
-        description: "Xiaomi stock ROM version"
-        required: true
-        default: "OS1.0.4.0.UOQINXM"
-
-      ROM_FILENAME:
-        description: "Xiaomi recovery ROM filename"
-        required: true
-        default: "miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
 
 permissions:
   contents: read
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+
+    env:
+      ROM_VERSION: "OS1.0.4.0.UOQINXM"
+      ROM_FILENAME: "miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
 
     steps:
 
       # ============================================================
-      # CHECKOUT
+      # 1. BASIC SETUP
       # ============================================================
-
-      - name: Checkout device tree
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-
-      # ============================================================
-      # INSTALL TOOLS
-      # ============================================================
-
-      - name: Install tools
-        shell: bash
+      - name: Install required tools
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          sudo apt-get update -qq
+          sudo apt-get update
 
-          sudo apt-get install -y -qq \
+          sudo apt-get install -y \
             aria2 \
             unzip \
+            zip \
+            p7zip-full \
             file \
-            binutils \
-            kmod \
             lz4 \
-            erofs-utils \
-            e2fsprogs \
             cpio \
-            rsync \
-            xz-utils \
-            zstd \
-            android-sdk-libsparse-utils
+            e2fsprogs \
+            erofs-utils \
+            android-sdk-libsparse-utils \
+            binutils \
+            grep \
+            sed \
+            awk \
+            jq \
+            python3 \
+            python3-pip
 
-          python3 -m pip install \
-            --disable-pip-version-check \
-            --no-cache-dir \
-            --user \
-            android-payload-dumper==2.3.0
-
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/bin:$PATH"
-
-          echo
-          echo "===== TOOL CHECK ====="
-
-          command -v aria2c
-          command -v fsck.erofs
-          command -v simg2img
-          command -v lz4
-          command -v cpio
-          command -v strings
-
-          echo
-          echo "===== PAYLOAD DUMPER ====="
-
-          python3 -m payload_dumper --version
-
-          echo
-          echo "Tools installed successfully."
+          python3 --version
+          aria2c --version
+          file --version
+          extract.erofs --help | head -20 || true
 
 
       # ============================================================
-      # FASTEST XIAOMI CDN
-      # SAME LOGIC AS PREVIOUS WORKFLOW
+      # 2. INSTALL PAYLOAD DUMPER
       # ============================================================
+      - name: Install android-payload-dumper
+        run: |
+          set -euxo pipefail
 
-      - name: Find fastest Xiaomi CDN
-        id: cdn
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade android-payload-dumper==2.3.0
+
+          python3 -m payload_dumper --version || true
+          payload-dumper --version || true
+
+
+      # ============================================================
+      # 3. CREATE WORK DIRECTORIES
+      # ============================================================
+      - name: Prepare workspace
+        run: |
+          set -euxo pipefail
+
+          rm -rf work
+          mkdir -p \
+            work/download \
+            work/payload \
+            work/partitions \
+            work/extracted \
+            work/analysis \
+            work/logs
+
+
+      # ============================================================
+      # 4. BUILD MIUI CDN URLS
+      # ============================================================
+      - name: Prepare ROM URLs
+        run: |
+          set -euxo pipefail
+
+          cat > work/cdn_urls.txt <<EOF
+          https://bn.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}
+          https://bigota.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}
+          EOF
+
+          cat work/cdn_urls.txt
+
+
+      # ============================================================
+      # 5. BENCHMARK MIUI CDNS
+      # ============================================================
+      - name: Benchmark Xiaomi CDNs
         shell: bash
-        env:
-          ROM_VERSION: ${{ inputs.ROM_VERSION }}
-          ROM_FILENAME: ${{ inputs.ROM_FILENAME }}
+        run: |
+          set -uo pipefail
 
+          : > work/cdn_benchmark.txt
+
+          while IFS= read -r URL; do
+            echo "Testing: $URL"
+
+            RESULT=$(
+              curl -L \
+                --connect-timeout 15 \
+                --max-time 30 \
+                -r 0-10485759 \
+                -o /dev/null \
+                -sS \
+                -w "%{http_code} %{speed_download}\n" \
+                "$URL" 2>/dev/null
+            ) || RESULT="000 0"
+
+            CODE=$(echo "$RESULT" | awk '{print $1}')
+            SPEED=$(echo "$RESULT" | awk '{print $2}')
+
+            echo "$SPEED $CODE $URL" | tee -a work/cdn_benchmark.txt
+
+          done < work/cdn_urls.txt
+
+          echo
+          echo "===== CDN BENCHMARK ====="
+          sort -nr work/cdn_benchmark.txt || true
+
+
+      # ============================================================
+      # 6. SELECT FASTEST WORKING CDN
+      # ============================================================
+      - name: Select fastest CDN
+        shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/benchmark
-          : > work/benchmark/results.txt
-
-          candidates=(
-            "https://bigota.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}"
-            "https://bn.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}"
-            "https://hugeota.d.miui.com/${ROM_VERSION}/${ROM_FILENAME}"
+          BEST_URL=$(
+            awk '$2 ~ /^2/ && $1 > 0 {print $1 " " $3}' \
+              work/cdn_benchmark.txt |
+            sort -nr |
+            head -1 |
+            cut -d' ' -f2-
           )
 
-          for url in "${candidates[@]}"; do
-
-            name="$(echo "$url" | sed -E 's#https://([^/]+)/.*#\1#')"
-
-            output="work/benchmark/${name}.bin"
-
-            echo
-            echo "========================================"
-            echo "Testing: $name"
-            echo "========================================"
-
-            start="$(date +%s)"
-
-            if curl \
-              -L \
-              --fail \
-              --silent \
-              --show-error \
-              --range 0-6677215 \
-              --max-time 60 \
-              -o "$output" \
-              "$url"; then
-
-              end="$(date +%s)"
-
-              bytes="$(stat -c %s "$output")"
-
-              elapsed=$((end - start))
-
-              if [ "$elapsed" -le 0 ]; then
-                elapsed=1
-              fi
-
-              speed="$(
-                awk \
-                  -v bytes="$bytes" \
-                  -v elapsed="$elapsed" \
-                  'BEGIN {
-                    printf "%.4f", bytes / 1048576 / elapsed
-                  }'
-              )"
-
-              echo "$speed $url" \
-                | tee -a work/benchmark/results.txt
-
-            else
-
-              echo "FAILED $url" \
-                | tee -a work/benchmark/results.txt
-
-            fi
-
-            rm -f "$output"
-
-          done
-
-          echo
-          echo "========================================"
-          echo "CDN RESULTS"
-          echo "========================================"
-
-          cat work/benchmark/results.txt
-
-          best="$(
-            grep -E '^[0-9]' work/benchmark/results.txt \
-              | sort -nr \
-              | head -n1
-          )"
-
-          if [ -z "$best" ]; then
-            echo "No working Xiaomi CDN found."
+          if [ -z "$BEST_URL" ]; then
+            echo "No working Xiaomi CDN was found."
+            cat work/cdn_benchmark.txt
             exit 1
           fi
 
-          speed="$(echo "$best" | cut -d' ' -f1)"
-          url="$(echo "$best" | cut -d' ' -f2-)"
+          echo "Selected CDN:"
+          echo "$BEST_URL"
 
-          echo
-          echo "FASTEST CDN:"
-          echo "$url"
-          echo "Speed: $speed MiB/s"
+          echo "ROM_URL=$BEST_URL" >> "$GITHUB_ENV"
 
-          echo "BEST_URL=$url" >> "$GITHUB_OUTPUT"
-          echo "BEST_SPEED=$speed" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # DOWNLOAD ROM
-      # SAME ARIA2 LOGIC
+      # 7. DOWNLOAD FULL STOCK ROM
       # ============================================================
-
       - name: Download stock ROM
         shell: bash
-        env:
-          ROM_URL: ${{ steps.cdn.outputs.BEST_URL }}
-          ROM_FILENAME: ${{ inputs.ROM_FILENAME }}
-
         run: |
           set -euo pipefail
 
-          mkdir -p work/rom
+          mkdir -p work/download
 
           aria2c \
+            --file-allocation=none \
+            --continue=true \
             --max-connection-per-server=16 \
             --split=16 \
-            --min-split-size=20M \
+            --min-split-size=10M \
             --max-tries=10 \
-            --retry-wait=3 \
+            --retry-wait=5 \
             --timeout=60 \
-            --connect-timeout=15 \
-            --continue=true \
-            --file-allocation=none \
-            --summary-interval=5 \
-            --console-log-level=notice \
-            -d work/rom \
-            -o "$ROM_FILENAME" \
+            --connect-timeout=30 \
+            --dir=work/download \
+            --out="$ROM_FILENAME" \
             "$ROM_URL"
 
-          echo
-          ls -lh "work/rom/$ROM_FILENAME"
+          ls -lh work/download/
 
 
       # ============================================================
-      # VERIFY ROM
+      # 8. VERIFY ZIP
       # ============================================================
-
-      - name: Verify ROM
-        shell: bash
+      - name: Verify downloaded ROM
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          sha256sum \
-            "work/rom/${{ inputs.ROM_FILENAME }}" \
-            | tee work/rom.sha256
+          ROM="work/download/$ROM_FILENAME"
 
-          unzip -t \
-            "work/rom/${{ inputs.ROM_FILENAME }}" \
-            > work/rom-zip-test.txt
+          test -f "$ROM"
+          test -s "$ROM"
 
-          echo "ROM ZIP verified."
+          file "$ROM"
+          sha256sum "$ROM" | tee work/logs/rom.sha256
+
+          unzip -t "$ROM" > work/logs/zip_test.txt
+
+          tail -5 work/logs/zip_test.txt
 
 
       # ============================================================
-      # EXTRACT PAYLOAD.BIN
+      # 9. EXTRACT PAYLOAD.BIN
       # ============================================================
-
       - name: Extract payload.bin
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/payload
+          ROM="work/download/$ROM_FILENAME"
 
-          unzip -j \
-            "work/rom/${{ inputs.ROM_FILENAME }}" \
-            "payload.bin" \
-            -d work/payload
+          unzip -l "$ROM" | grep -E '(^|/)payload\.bin$' || {
+            echo "payload.bin was not found in the ROM."
+            exit 1
+          }
 
-          test -f work/payload/payload.bin
+          unzip -p "$ROM" payload.bin > work/payload/payload.bin
+
+          test -s work/payload/payload.bin
 
           ls -lh work/payload/payload.bin
+          file work/payload/payload.bin
+
+          sha256sum work/payload/payload.bin \
+            | tee work/logs/payload.sha256
 
 
       # ============================================================
-      # LIST PAYLOAD PARTITIONS
-      #
-      # THIS PREVENTS FAILURE IF A REQUESTED PARTITION IS NOT
-      # PRESENT IN THIS PARTICULAR OTA.
+      # 10. LIST PAYLOAD PARTITIONS
       # ============================================================
-
       - name: List payload partitions
         shell: bash
         run: |
@@ -288,103 +247,79 @@ jobs:
           python3 -m payload_dumper \
             work/payload/payload.bin \
             -l \
-            --json \
-            > work/payload/partitions.json
+            > work/logs/payload_partitions.txt
 
-          cat work/payload/partitions.json
+          cat work/logs/payload_partitions.txt
 
 
       # ============================================================
-      # SELECT PARTITIONS
-      #
-      # SAME TARGETS AS PREVIOUS WORKFLOW.
-      # ODM IS NOT REQUESTED BECAUSE BERYL HAS MERGED ODM.
+      # 11. SELECT ONLY PARTITIONS ACTUALLY PRESENT
       # ============================================================
-
-      - name: Select available partitions
+      - name: Select available analysis partitions
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import json
+          declare -a REQUESTED=(
+            vendor
+            vendor_dlkm
+            odm
+            odm_dlkm
+            system
+            system_ext
+            product
+            system_dlkm
+            init_boot
+            boot
+            dtbo
+            vendor_boot
+            vbmeta
+            vbmeta_system
+            vbmeta_vendor
+          )
 
-          with open("work/payload/partitions.json", "r") as f:
-              data = json.load(f)
+          : > work/logs/selected_partitions.txt
+          : > work/logs/missing_partitions.txt
 
-          names = set()
+          for PART in "${REQUESTED[@]}"; do
+            if grep -Eq "│[[:space:]]*$PART[[:space:]]*│" \
+              work/logs/payload_partitions.txt; then
 
-          def walk(obj):
-              if isinstance(obj, dict):
-                  for k, v in obj.items():
-                      if k in ("name", "partition", "partition_name"):
-                          if isinstance(v, str):
-                              names.add(v)
-                      walk(v)
+              echo "$PART" | tee -a work/logs/selected_partitions.txt
 
-              elif isinstance(obj, list):
-                  for item in obj:
-                      walk(item)
+            else
 
-          walk(data)
+              echo "$PART" | tee -a work/logs/missing_partitions.txt
 
-          wanted = [
-              "vendor",
-              "vendor_dlkm",
-              "system",
-              "system_ext",
-              "product",
-              "system_dlkm",
-              "init_boot",
-              "boot",
-              "vendor_boot",
-              "dtbo",
-              "vbmeta",
-              "vbmeta_system",
-              "vbmeta_vendor",
-          ]
-
-          selected = [x for x in wanted if x in names]
-
-          if not selected:
-              raise SystemExit("No requested partitions were found.")
-
-          print("Available requested partitions:")
-
-          for item in selected:
-              print(item)
-
-          with open("work/payload/selected.txt", "w") as f:
-              f.write(" ".join(selected))
-          PY
+            fi
+          done
 
           echo
-          echo "===== SELECTED ====="
-          cat work/payload/selected.txt
+          echo "===== AVAILABLE ====="
+          cat work/logs/selected_partitions.txt
+
+          echo
+          echo "===== MISSING ====="
+          cat work/logs/missing_partitions.txt || true
+
+          if [ ! -s work/logs/selected_partitions.txt ]; then
+            echo "No requested partitions were found."
+            exit 1
+          fi
 
 
       # ============================================================
-      # PAYLOAD DUMPER
-      #
-      # SAME LOGIC:
-      #
-      # payload.bin
-      #     ↓
-      # payload-dumper
-      #     ↓
-      # selected .img files
-      #
-      # We invoke it through Python so PATH cannot break the job.
+      # 12. EXTRACT STOCK PARTITIONS
       # ============================================================
-
       - name: Extract stock partitions
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/partitions
+          mapfile -t PARTITIONS < work/logs/selected_partitions.txt
 
-          read -r -a PARTITIONS < work/payload/selected.txt
+          echo "Extracting:"
+          printf '  %s\n' "${PARTITIONS[@]}"
 
           python3 -m payload_dumper \
             work/payload/payload.bin \
@@ -393,891 +328,815 @@ jobs:
             -j 8
 
           echo
-          echo "========================================"
-          echo "EXTRACTED PARTITIONS"
-          echo "========================================"
+          echo "===== EXTRACTED IMAGES ====="
 
           find work/partitions \
             -maxdepth 1 \
             -type f \
-            -printf '%f\n' \
+            -name '*.img' \
+            -printf '%f %s bytes\n' \
             | sort
 
 
       # ============================================================
-      # EXTRACT FILESYSTEMS
-      # SAME EROFS LOGIC USED FOR VENDOR_DLKMS
+      # 13. IDENTIFY FILESYSTEM TYPES
       # ============================================================
-
-      - name: Extract partition filesystems
+      - name: Identify partition filesystems
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/extracted
+          : > work/logs/filesystems.txt
 
-          extract_partition() {
+          for IMG in work/partitions/*.img; do
+            [ -f "$IMG" ] || continue
 
-            image="$1"
-            name="$2"
+            echo "===== $(basename "$IMG") =====" \
+              | tee -a work/logs/filesystems.txt
 
-            if [ ! -f "$image" ]; then
-              echo "SKIP: $image"
-              return 0
+            file "$IMG" \
+              | tee -a work/logs/filesystems.txt
+
+            echo \
+              | tee -a work/logs/filesystems.txt
+          done
+
+
+      # ============================================================
+      # 14. EXTRACT EROFS FILESYSTEMS
+      # ============================================================
+      - name: Extract EROFS partitions
+        shell: bash
+        run: |
+          set -u
+
+          for IMG in \
+            vendor \
+            vendor_dlkm \
+            odm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product \
+            system_dlkm
+          do
+
+            SRC="work/partitions/${IMG}.img"
+
+            if [ ! -f "$SRC" ]; then
+              continue
             fi
 
-            mkdir -p "work/extracted/$name"
+            if file "$SRC" | grep -qi "EROFS"; then
 
-            type="$(file -b "$image")"
+              echo "Extracting EROFS: $IMG"
 
-            echo
-            echo "========================================"
-            echo "$name"
-            echo "$type"
-            echo "========================================"
+              mkdir -p "work/extracted/$IMG"
 
-            if echo "$type" | grep -qi "EROFS"; then
-
-              fsck.erofs \
-                --extract="work/extracted/$name" \
-                "$image"
-
-            elif echo "$type" | grep -qi "Android sparse"; then
-
-              raw="work/extracted/${name}.raw.img"
-
-              simg2img \
-                "$image" \
-                "$raw"
-
-              mountpoint="/mnt/beryl_$name"
-
-              sudo mkdir -p "$mountpoint"
-
-              sudo mount \
-                -o loop,ro \
-                "$raw" \
-                "$mountpoint"
-
-              sudo rsync \
-                -a \
-                "$mountpoint/" \
-                "work/extracted/$name/"
-
-              sudo umount "$mountpoint"
-
-              rm -f "$raw"
-
-            elif echo "$type" | grep -qi "ext4"; then
-
-              mountpoint="/mnt/beryl_$name"
-
-              sudo mkdir -p "$mountpoint"
-
-              sudo mount \
-                -o loop,ro \
-                "$image" \
-                "$mountpoint"
-
-              sudo rsync \
-                -a \
-                "$mountpoint/" \
-                "work/extracted/$name/"
-
-              sudo umount "$mountpoint"
+              extract.erofs \
+                -i "$SRC" \
+                -x \
+                -T0 \
+                -f \
+                -o "$PWD/work/extracted/$IMG" \
+                > "work/logs/${IMG}_extract.log" 2>&1 \
+                || {
+                  echo "EROFS extraction failed for $IMG"
+                  cat "work/logs/${IMG}_extract.log"
+                }
 
             else
 
-              echo "No filesystem extraction for: $type"
+              echo "Skipping $IMG: not detected as EROFS"
 
             fi
-          }
+          done
 
-          extract_partition \
-            work/partitions/vendor.img \
-            vendor
 
-          extract_partition \
-            work/partitions/vendor_dlkm.img \
-            vendor_dlkm
+      # ============================================================
+      # 15. EXTRACT EXT4 FILESYSTEMS IF PRESENT
+      # ============================================================
+      - name: Extract EXT4 partitions
+        shell: bash
+        run: |
+          set -u
 
-          extract_partition \
-            work/partitions/system.img \
-            system
-
-          extract_partition \
-            work/partitions/system_ext.img \
-            system_ext
-
-          extract_partition \
-            work/partitions/product.img \
-            product
-
-          extract_partition \
-            work/partitions/system_dlkm.img \
+          for IMG in \
+            vendor \
+            vendor_dlkm \
+            odm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product \
             system_dlkm
+          do
+
+            SRC="work/partitions/${IMG}.img"
+
+            if [ ! -f "$SRC" ]; then
+              continue
+            fi
+
+            if file "$SRC" | grep -qiE "ext4 filesystem"; then
+
+              echo "Extracting EXT4: $IMG"
+
+              mkdir -p "work/extracted/$IMG"
+
+              debugfs \
+                -R "rdump / $PWD/work/extracted/$IMG" \
+                "$SRC" \
+                > "work/logs/${IMG}_debugfs.log" 2>&1 \
+                || {
+                  echo "EXT4 extraction failed for $IMG"
+                  cat "work/logs/${IMG}_debugfs.log"
+                }
+
+            fi
+          done
 
 
       # ============================================================
-      # COMPLETE FILE INVENTORY
+      # 16. EXTRACT VENDOR_BOOT RAMDISK
       # ============================================================
+      - name: Analyze vendor_boot
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          IMG="work/partitions/vendor_boot.img"
+
+          if [ ! -f "$IMG" ]; then
+            echo "vendor_boot.img not present in payload."
+            exit 0
+          fi
+
+          file "$IMG" | tee work/logs/vendor_boot.file.txt
+
+          mkdir -p work/extracted/vendor_boot
+
+
+          # Try Android boot image tools if available.
+          if command -v unpack_bootimg >/dev/null 2>&1; then
+
+            unpack_bootimg \
+              --boot_img="$IMG" \
+              --out=work/extracted/vendor_boot \
+              > work/logs/vendor_boot_unpack.txt 2>&1 \
+              || true
+
+          fi
+
+
+          find work/extracted/vendor_boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p\n' \
+            | sort \
+            > work/logs/vendor_boot_files.txt
+
+          cat work/logs/vendor_boot_files.txt || true
+
+
+      # ============================================================
+      # 17. SEARCH FBE CONFIGURATION
+      # ============================================================
+      - name: Analyze FBE configuration
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/fbe_configuration.txt"
+
+          {
+            echo "=========================================="
+            echo "STOCK FBE CONFIGURATION ANALYSIS"
+            echo "Device: POCO M7 Pro 5G / beryl"
+            echo "ROM: $ROM_VERSION"
+            echo "=========================================="
+            echo
+
+            echo "### FSTAB FILES"
+            find work/extracted \
+              -type f \
+              \( -iname 'fstab*' -o -iname '*fstab*' \) \
+              -print \
+              | sort
+
+            echo
+            echo "### FSTAB CONTENT"
+            find work/extracted \
+              -type f \
+              \( -iname 'fstab*' -o -iname '*fstab*' \) \
+              -print0 |
+            while IFS= read -r -d '' F; do
+              echo
+              echo "----- $F -----"
+              cat "$F"
+            done
+
+            echo
+            echo "### FBE / FILEENCRYPTION REFERENCES"
+            grep -RniE \
+              'fileencryption|metadata_encryption|keydirectory|wrappedkey|keyref|fscrypt|inlinecrypt|emmc_optimized|f2fs' \
+              work/extracted \
+              2>/dev/null \
+              | head -1000 || true
+
+            echo
+            echo "### METADATA REFERENCES"
+            grep -RniE \
+              'metadata' \
+              work/extracted/vendor/etc \
+              work/extracted/system/etc \
+              work/extracted/system_ext/etc \
+              2>/dev/null \
+              | head -500 || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 18. ANALYZE VOLD
+      # ============================================================
+      - name: Analyze vold and fscrypt
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/vold_fscrypt.txt"
+
+          {
+            echo "=========================================="
+            echo "VOLD / FSCRYPT ANALYSIS"
+            echo "=========================================="
+
+            echo
+            echo "### VOLD BINARIES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'vold' \
+                -o -name '*fscrypt*' \
+                -o -name '*cryptfs*' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### VOLD STRINGS"
+
+            while IFS= read -r F; do
+              echo
+              echo "----- $F -----"
+
+              strings "$F" 2>/dev/null |
+                grep -iE \
+                'fscrypt|fileencryption|metadata|keymaster|keymint|gatekeeper|wrapped|inlinecrypt|fbe|cryptfs' \
+                | head -500 || true
+
+            done < <(
+              find work/extracted \
+                -type f \
+                \( -name 'vold' -o -name '*fscrypt*' \) \
+                -print
+            )
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 19. FIND KEYMINT / KEYMASTER / GATEKEEPER
+      # ============================================================
+      - name: Analyze KeyMint stack
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/keymint.txt"
+
+          {
+            echo "=========================================="
+            echo "KEYMINT / KEYMASTER / GATEKEEPER ANALYSIS"
+            echo "=========================================="
+
+            echo
+            echo "### POSSIBLE KEYMINT FILES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -iname '*keymint*' \
+                -o -iname '*keymaster*' \
+                -o -iname '*gatekeeper*' \
+                -o -iname '*secure*element*' \
+                -o -iname '*weaver*' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### KEYMINT REFERENCES"
+
+            grep -RniE \
+              'android\.hardware\.security\.keymint|keymint|keymaster|gatekeeper|weaver' \
+              work/extracted \
+              2>/dev/null \
+              | head -2000 || true
+
+            echo
+            echo "### KEYMINT BINARIES AND LIBRARIES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'android.hardware.security.keymint*' \
+                -o -name '*keymint*.so' \
+                -o -name '*keymaster*.so' \
+                -o -name '*gatekeeper*.so' \
+              \) \
+              -print \
+              | sort
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 20. ANALYZE INIT SERVICES
+      # ============================================================
+      - name: Analyze crypto init services
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/init_crypto_services.txt"
+
+          {
+            echo "=========================================="
+            echo "CRYPTO / KEYMINT INIT SERVICES"
+            echo "=========================================="
+
+            grep -RniE \
+              'keymint|keymaster|gatekeeper|vold|cryptfs|fscrypt|keystore2|tee|trustonic|trusty' \
+              work/extracted \
+              --include='*.rc' \
+              --include='*.xml' \
+              2>/dev/null \
+              | head -3000 || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 21. ANALYZE VINTF HAL DECLARATIONS
+      # ============================================================
+      - name: Analyze security HALs
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/security_hal_vintf.txt"
+
+          {
+            echo "=========================================="
+            echo "SECURITY HAL / VINTF ANALYSIS"
+            echo "=========================================="
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name '*manifest*.xml' \
+                -o -name '*matrix*.xml' \
+                -o -path '*/etc/vintf/*' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### SECURITY HAL REFERENCES"
+
+            grep -RniE \
+              'keymint|keymaster|gatekeeper|weaver|secure_element' \
+              work/extracted \
+              --include='*.xml' \
+              2>/dev/null \
+              | head -3000 || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 22. ANALYZE SECURITY PROPERTIES
+      # ============================================================
+      - name: Analyze security properties
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/security_properties.txt"
+
+          {
+            echo "=========================================="
+            echo "SECURITY / FBE PROPERTIES"
+            echo "=========================================="
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'build.prop' \
+                -o -name '*.prop' \
+              \) \
+              -print0 |
+            while IFS= read -r -d '' F; do
+
+              echo
+              echo "----- $F -----"
+
+              grep -E \
+                'ro\.crypto|ro\.security|ro\.boot\.verifiedboot|ro\.build\.version|keymint|keymaster|fscrypt|fbe|vold' \
+                "$F" \
+                2>/dev/null \
+                || true
+
+            done
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 23. ANALYZE CRYPTO LIBRARIES
+      # ============================================================
+      - name: Analyze crypto libraries
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/crypto_libraries.txt"
+
+          {
+            echo "=========================================="
+            echo "CRYPTO LIBRARY ANALYSIS"
+            echo "=========================================="
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'libcrypto*' \
+                -o -name 'libkeymaster*' \
+                -o -name 'libkeymint*' \
+                -o -name '*keystore*.so' \
+                -o -name '*fscrypt*.so' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### SYMBOL / STRING REFERENCES"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'libkeymaster*' \
+                -o -name 'libkeymint*' \
+                -o -name '*keystore*.so' \
+              \) \
+              -print0 |
+            while IFS= read -r -d '' F; do
+
+              echo
+              echo "----- $F -----"
+
+              strings "$F" 2>/dev/null |
+                grep -iE \
+                'keymint|keymaster|keystore|secure|fscrypt|crypto|hardware' \
+                | head -300 || true
+
+            done
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 24. ANALYZE SELINUX SECURITY LABELS
+      # ============================================================
+      - name: Analyze SELinux security files
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/selinux_security.txt"
+
+          {
+            echo "=========================================="
+            echo "SELINUX SECURITY ANALYSIS"
+            echo "=========================================="
+
+            find work/extracted \
+              -type f \
+              \( \
+                -name 'file_contexts*' \
+                -o -name '*sepolicy*' \
+                -o -name 'property_contexts' \
+                -o -name 'service_contexts' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### KEYMINT / VOLD SELINUX REFERENCES"
+
+            grep -RniE \
+              'keymint|keymaster|gatekeeper|vold|keystore|metadata' \
+              work/extracted \
+              --include='*context*' \
+              2>/dev/null \
+              | head -2000 || true
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 25. ANALYZE VENDOR_DLKM
+      # ============================================================
+      - name: Analyze vendor_dlkm
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/vendor_dlkm.txt"
+
+          {
+            echo "=========================================="
+            echo "VENDOR_DLKM ANALYSIS"
+            echo "=========================================="
+
+            if [ -d work/extracted/vendor_dlkm ]; then
+
+              echo
+              echo "### MODULES"
+
+              find work/extracted/vendor_dlkm \
+                -type f \
+                -name '*.ko' \
+                -print \
+                | sort
+
+              echo
+              echo "### MODULES.LOAD"
+
+              find work/extracted/vendor_dlkm \
+                -type f \
+                -name 'modules.load*' \
+                -print0 |
+              while IFS= read -r -d '' F; do
+                echo
+                echo "----- $F -----"
+                cat "$F"
+              done
+
+              echo
+              echo "### MODULES.DEP"
+
+              find work/extracted/vendor_dlkm \
+                -type f \
+                -name 'modules.dep*' \
+                -print0 |
+              while IFS= read -r -d '' F; do
+                echo
+                echo "----- $F -----"
+                cat "$F"
+              done
+
+            fi
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 26. FIND FIRMWARE / TEE MATERIAL
+      # ============================================================
+      - name: Analyze firmware and TEE references
+        shell: bash
+        run: |
+          set -u
+
+          OUT="work/analysis/firmware_tee.txt"
+
+          {
+            echo "=========================================="
+            echo "FIRMWARE / TEE ANALYSIS"
+            echo "=========================================="
+
+            echo
+            echo "### SECURITY-RELATED FIRMWARE"
+
+            find work/extracted \
+              -type f \
+              \( \
+                -iname '*keymint*' \
+                -o -iname '*keymaster*' \
+                -o -iname '*trusty*' \
+                -o -iname '*tee*' \
+                -o -iname '*tz*' \
+                -o -iname '*km*' \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "### FIRMWARE DIRECTORIES"
+
+            find work/extracted \
+              -type d \
+              \( \
+                -path '*/firmware*' \
+                -o -path '*/tee*' \
+                -o -path '*/trusty*' \
+              \) \
+              -print \
+              | sort
+
+          } > "$OUT"
+
+          cat "$OUT"
+
+
+      # ============================================================
+      # 27. CREATE MACHINE-READABLE FILE INVENTORY
+      # ============================================================
       - name: Create file inventory
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/report
-
           find work/extracted \
-            -print \
+            -type f \
+            -printf '%p\t%s bytes\n' \
             | sort \
-            > work/report/all-files.txt
+            > work/analysis/file_inventory.txt
 
-          echo "Total entries:"
-          wc -l work/report/all-files.txt
+          find work/partitions \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\t%s bytes\n' \
+            | sort \
+            > work/analysis/partition_inventory.txt
 
 
       # ============================================================
-      # VENDOR_DLKMS MODULE ANALYSIS
+      # 28. GENERATE FINAL SUMMARY
       # ============================================================
-
-      - name: Analyze vendor_dlkm modules
+      - name: Generate FBE analysis summary
         shell: bash
         run: |
           set -euo pipefail
+
+          OUT="work/analysis/FBE_KEYMINT_SUMMARY.txt"
 
           {
-            echo "=============================================="
-            echo "BERYL VENDOR_DLKMS MODULE ANALYSIS"
-            echo "=============================================="
+            echo "============================================================"
+            echo "POCO M7 PRO 5G / BERYL"
+            echo "STOCK FBE + KEYMINT ANALYSIS"
+            echo "============================================================"
+            echo
+            echo "ROM_VERSION : $ROM_VERSION"
+            echo "ROM_FILENAME: $ROM_FILENAME"
+            echo
+            echo "============================================================"
+            echo "PARTITIONS"
+            echo "============================================================"
+            cat work/logs/selected_partitions.txt
+            echo
+            echo "Missing requested partitions:"
+            cat work/logs/missing_partitions.txt || true
 
             echo
-            echo "===== MODULE COUNT ====="
-
-            find work/extracted/vendor_dlkm \
-              -type f \
-              -name "*.ko" \
-              | wc -l
-
-            echo
-            echo "===== MODULES ====="
-
-            find work/extracted/vendor_dlkm \
-              -type f \
-              -name "*.ko" \
-              | sort
-
-            echo
-            echo "===== MODULES.LOAD ====="
-
-            find work/extracted/vendor_dlkm \
-              -type f \
-              -name "modules.load" \
-              -print \
-              -exec cat {} \;
-
-            echo
-            echo "===== MODULES.DEP ====="
-
-            find work/extracted/vendor_dlkm \
-              -type f \
-              -name "modules.dep" \
-              -print \
-              -exec cat {} \;
-
-          } > work/report/vendor-dlkm-analysis.txt
-
-
-      # ============================================================
-      # MODULE VERMAGIC
-      # ============================================================
-
-      - name: Analyze module vermagic
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "MODULE VERMAGIC"
-            echo "=============================================="
-
-            while IFS= read -r module; do
-
-              echo
-              echo "----- $module -----"
-
-              modinfo \
-                -F vermagic \
-                "$module" \
-                2>/dev/null \
-                || true
-
-            done < <(
-              find work/extracted \
-                -type f \
-                -name "*.ko" \
-                | sort
-            )
-
-          } > work/report/module-vermagic.txt
-
-
-      # ============================================================
-      # MODULE DEPENDENCIES
-      # ============================================================
-
-      - name: Analyze module dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "MODULE DEPENDENCIES"
-            echo "=============================================="
-
-            while IFS= read -r dep; do
-
-              echo
-              echo "----- $dep -----"
-
-              cat "$dep"
-
-            done < <(
-              find work/extracted \
-                -type f \
-                -name "modules.dep" \
-                | sort
-            )
-
-          } > work/report/module-dependencies.txt
-
-
-      # ============================================================
-      # FIRMWARE REFERENCES FROM MODULES
-      # ============================================================
-
-      - name: Analyze module firmware references
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p work/report/firmware-references
-
-          while IFS= read -r module; do
-
-            name="$(basename "$module")"
-
-            strings "$module" \
-              2>/dev/null \
-              | grep -Ei \
-                'request_firmware|firmware|/odm/firmware|/vendor/firmware|\.bin|\.fw' \
-              | sort -u \
-              > "work/report/firmware-references/$name.txt" \
-              || true
-
-          done < <(
-            find work/extracted \
-              -type f \
-              -name "*.ko" \
-              | sort
-          )
-
-
-      # ============================================================
-      # FSTAB
-      # ============================================================
-
-      - name: Analyze fstab
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "ALL FSTAB FILES"
-            echo "=============================================="
-
-            find work/extracted \
-              -type f \
-              \( \
-                -iname "fstab*" \
-                -o \
-                -iname "*fstab*" \
-              \) \
-              | sort
-
-            echo
-            echo "=============================================="
-            echo "FSTAB CONTENT"
-            echo "=============================================="
-
-            while IFS= read -r file; do
-
-              echo
-              echo "----- $file -----"
-
-              cat "$file"
-
-            done < <(
-              find work/extracted \
-                -type f \
-                \( \
-                  -iname "fstab*" \
-                  -o \
-                  -iname "*fstab*" \
-                \) \
-                | sort
-            )
-
-          } > work/report/fstab-analysis.txt
-
-
-      # ============================================================
-      # FBE
-      # ============================================================
-
-      - name: Analyze FBE configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
+            echo "============================================================"
             echo "FBE CONFIGURATION"
-            echo "=============================================="
-
-            echo
-            echo "===== fileencryption ====="
-
-            grep -RniE \
-              "fileencryption" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== metadata_encryption ====="
-
-            grep -RniE \
-              "metadata_encryption" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== keydirectory ====="
-
-            grep -RniE \
-              "keydirectory" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== inlinecrypt ====="
-
-            grep -RniE \
-              "inlinecrypt" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== wrappedkey ====="
-
-            grep -RniE \
-              "wrappedkey" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== fscrypt ====="
-
-            grep -RniE \
-              "fscrypt" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== cryptfs ====="
-
-            grep -RniE \
-              "cryptfs" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-          } > work/report/fbe-analysis.txt
-
-
-      # ============================================================
-      # VOLD
-      # ============================================================
-
-      - name: Analyze vold
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "VOLD ANALYSIS"
-            echo "=============================================="
-
-            echo
-            echo "===== VOLD FILES ====="
-
-            find work/extracted \
-              -type f \
-              | grep -E '/vold$|/vold\.' \
-              | sort \
-              || true
-
-            echo
-            echo "===== VOLD REFERENCES ====="
-
-            grep -RniE \
-              "vold|fscrypt|cryptfs|mount_all|post-fs-data" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-          } > work/report/vold-analysis.txt
-
-
-      # ============================================================
-      # KEYMINT / KEYMASTER / GATEKEEPER
-      # ============================================================
-
-      - name: Analyze KeyMint security stack
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "KEYMINT / KEYMASTER / GATEKEEPER"
-            echo "=============================================="
-
-            echo
-            echo "===== KEYMINT FILES ====="
-
-            find work/extracted \
-              -type f \
-              | grep -Ei "keymint" \
-              | sort \
-              || true
-
-            echo
-            echo "===== KEYMASTER FILES ====="
-
-            find work/extracted \
-              -type f \
-              | grep -Ei "keymaster" \
-              | sort \
-              || true
-
-            echo
-            echo "===== GATEKEEPER FILES ====="
-
-            find work/extracted \
-              -type f \
-              | grep -Ei "gatekeeper" \
-              | sort \
-              || true
-
-            echo
-            echo "===== KEYSTORE FILES ====="
-
-            find work/extracted \
-              -type f \
-              | grep -Ei "keystore" \
-              | sort \
-              || true
-
-            echo
-            echo "===== KEYMINT INTERFACES ====="
-
-            grep -RniE \
-              "android\.hardware\.security\.keymint|IKeyMint|IKeyMintDevice|keymint-service" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== KEYMASTER INTERFACES ====="
-
-            grep -RniE \
-              "android\.hardware\.keymaster|IKeymaster|keymaster@" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-          } > work/report/keymint-analysis.txt
-
-
-      # ============================================================
-      # KEYMINT VERSION
-      # ============================================================
-
-      - name: Determine KeyMint version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "KEYMINT VERSION"
-            echo "=============================================="
-
-            echo
-            echo "===== AIDL KEYMINT ====="
-
-            grep -RniE \
-              "android\.hardware\.security\.keymint" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== KEYMINT VERSION REFERENCES ====="
-
-            grep -RniE \
-              "KeyMint|keymint.*version|version.*keymint|IKeyMint" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== HIDL KEYMASTER ====="
-
-            grep -RniE \
-              "android\.hardware\.keymaster@[0-9]+\.[0-9]+" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-          } > work/report/keymint-version.txt
-
-
-      # ============================================================
-      # VINTF
-      # ============================================================
-
-      - name: Analyze VINTF
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "VINTF SECURITY SERVICES"
-            echo "=============================================="
-
-            echo
-            echo "===== MANIFEST FILES ====="
-
-            find work/extracted \
-              -type f \
-              \( \
-                -name "manifest.xml" \
-                -o \
-                -name "*manifest*.xml" \
-              \) \
-              | sort
-
-            echo
-            echo "===== SECURITY HALS ====="
-
-            grep -RniE \
-              "keymint|keymaster|gatekeeper|android\.hardware\.security" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-          } > work/report/vintf-analysis.txt
-
-
-      # ============================================================
-      # INIT SECURITY SERVICES
-      # ============================================================
-
-      - name: Analyze security init
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "SECURITY INIT SERVICES"
-            echo "=============================================="
-
-            grep -RniE \
-              "service .*vold|service .*keymint|service .*keymaster|service .*gatekeeper|service .*keystore" \
-              work/extracted \
-              2>/dev/null \
-              || true
-
-            echo
-            echo "===== POST-FS-DATA ====="
-
-            grep -RniE \
-              "post-fs-data|post-fs" \
-              work/extracted \
-              --include="*.rc" \
-              2>/dev/null \
-              || true
-
-          } > work/report/init-security.txt
-
-
-      # ============================================================
-      # SELINUX
-      # ============================================================
-
-      - name: Analyze SELinux security
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "SELINUX SECURITY"
-            echo "=============================================="
-
-            grep -RniE \
-              "keymint|keymaster|gatekeeper|keystore|vold|fscrypt" \
-              work/extracted \
-              --include="*.te" \
-              --include="*.cil" \
-              --include="file_contexts*" \
-              --include="service_contexts*" \
-              2>/dev/null \
-              || true
-
-          } > work/report/selinux-security.txt
-
-
-      # ============================================================
-      # CRYPTO MODULES
-      # ============================================================
-
-      - name: Analyze crypto modules
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "CRYPTO / FBE KERNEL MODULES"
-            echo "=============================================="
-
-            find work/extracted \
-              -type f \
-              -name "*.ko" \
-              | grep -Ei \
-                "crypto|fscrypt|dm-crypt|crypt|f2fs|inline" \
-              | sort \
-              || true
-
-          } > work/report/crypto-modules.txt
-
-
-      # ============================================================
-      # FIRMWARE
-      # ============================================================
-
-      - name: Inventory firmware
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "FIRMWARE INVENTORY"
-            echo "=============================================="
-
-            find work/extracted \
-              -type f \
-              | grep -Ei \
-                "/firmware/|\.bin$|\.fw$|\.mbn$" \
-              | sort \
-              || true
-
-          } > work/report/firmware-inventory.txt
-
-
-      # ============================================================
-      # MERGED ODM
-      # ============================================================
-
-      - name: Check merged ODM
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "=============================================="
-            echo "MERGED ODM"
-            echo "=============================================="
-
-            echo
-            echo "===== vendor/odm ====="
-
-            find work/extracted/vendor \
-              -path "*vendor/odm*" \
-              -print \
-              2>/dev/null \
-              | sort \
-              || true
-
-            echo
-            echo "===== ODM REFERENCES ====="
-
-            grep -RniE \
-              "/odm/|vendor/odm" \
-              work/extracted/vendor \
-              2>/dev/null \
-              | head -1000 \
-              || true
-
-          } > work/report/merged-odm.txt
-
-
-      # ============================================================
-      # MASTER REPORT
-      # ============================================================
-
-      - name: Generate master report
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
             echo "============================================================"
-            echo "BERYL STOCK FBE + KEYMINT ANALYSIS"
-            echo "============================================================"
-            echo
-            echo "Device: POCO M7 Pro 5G"
-            echo "Codename: beryl"
-            echo "ROM: ${{ inputs.ROM_VERSION }}"
-            echo "Android: 14"
-            echo
-            echo "Fastest CDN:"
-            echo "${{ steps.cdn.outputs.BEST_URL }}"
-            echo
-            echo "Benchmark:"
-            echo "${{ steps.cdn.outputs.BEST_SPEED }} MiB/s"
-            echo
-
-            echo "============================================================"
-            echo "FSTAB"
-            echo "============================================================"
-            cat work/report/fstab-analysis.txt
+            cat work/analysis/fbe_configuration.txt
 
             echo
             echo "============================================================"
-            echo "FBE"
+            echo "VOLD / FSCRYPT"
             echo "============================================================"
-            cat work/report/fbe-analysis.txt
-
-            echo
-            echo "============================================================"
-            echo "VOLD"
-            echo "============================================================"
-            cat work/report/vold-analysis.txt
+            cat work/analysis/vold_fscrypt.txt
 
             echo
             echo "============================================================"
             echo "KEYMINT"
             echo "============================================================"
-            cat work/report/keymint-analysis.txt
+            cat work/analysis/keymint.txt
 
             echo
             echo "============================================================"
-            echo "KEYMINT VERSION"
+            echo "INIT CRYPTO SERVICES"
             echo "============================================================"
-            cat work/report/keymint-version.txt
+            cat work/analysis/init_crypto_services.txt
 
             echo
             echo "============================================================"
-            echo "VINTF"
+            echo "SECURITY HAL / VINTF"
             echo "============================================================"
-            cat work/report/vintf-analysis.txt
+            cat work/analysis/security_hal_vintf.txt
 
             echo
             echo "============================================================"
-            echo "INIT SECURITY"
+            echo "SECURITY PROPERTIES"
             echo "============================================================"
-            cat work/report/init-security.txt
+            cat work/analysis/security_properties.txt
+
+            echo
+            echo "============================================================"
+            echo "CRYPTO LIBRARIES"
+            echo "============================================================"
+            cat work/analysis/crypto_libraries.txt
 
             echo
             echo "============================================================"
             echo "SELINUX"
             echo "============================================================"
-            cat work/report/selinux-security.txt
+            cat work/analysis/selinux_security.txt
 
             echo
             echo "============================================================"
-            echo "CRYPTO"
+            echo "VENDOR_DLKM"
             echo "============================================================"
-            cat work/report/crypto-modules.txt
+            cat work/analysis/vendor_dlkm.txt
 
             echo
             echo "============================================================"
-            echo "FIRMWARE"
+            echo "FIRMWARE / TEE"
             echo "============================================================"
-            cat work/report/firmware-inventory.txt
+            cat work/analysis/firmware_tee.txt
 
-            echo
-            echo "============================================================"
-            echo "MERGED ODM"
-            echo "============================================================"
-            cat work/report/merged-odm.txt
+          } > "$OUT"
 
-          } > work/report/MASTER_REPORT.txt
-
-          echo
-          echo "MASTER REPORT:"
-          wc -l work/report/MASTER_REPORT.txt
+          cat "$OUT"
 
 
       # ============================================================
-      # PACKAGE
+      # 29. PACKAGE ANALYSIS
       # ============================================================
-
-      - name: Package analysis
+      - name: Package analysis results
         shell: bash
         run: |
           set -euo pipefail
 
-          tar \
-            -czf \
-            beryl-stock-fbe-keymint-analysis.tar.gz \
-            -C work \
-            report
+          mkdir -p work/result
 
-          ls -lh \
-            beryl-stock-fbe-keymint-analysis.tar.gz
+          cp -a work/analysis \
+            work/logs \
+            work/result/
+
+          cp work/logs/payload_partitions.txt \
+            work/result/
+
+          cp work/logs/selected_partitions.txt \
+            work/result/
+
+          cp work/logs/missing_partitions.txt \
+            work/result/
+
+          tar -czf \
+            stock-fbe-keymint-analysis.tar.gz \
+            -C work/result .
+
+          ls -lh stock-fbe-keymint-analysis.tar.gz
 
 
       # ============================================================
-      # UPLOAD ARTIFACT
+      # 30. UPLOAD RESULTS
       # ============================================================
-
-      - name: Upload analysis
+      - name: Upload FBE KeyMint analysis
         uses: actions/upload-artifact@v4
         with:
           name: beryl-stock-fbe-keymint-analysis
           path: |
-            work/report/
-            work/rom.sha256
-            work/benchmark/
-            work/payload/partitions.json
-            beryl-stock-fbe-keymint-analysis.tar.gz
-          retention-days: 7
+            stock-fbe-keymint-analysis.tar.gz
+            work/analysis/FBE_KEYMINT_SUMMARY.txt
+            work/logs/payload_partitions.txt
+            work/logs/selected_partitions.txt
+            work/logs/missing_partitions.txt
+          if-no-files-found: error
+          retention-days: 14
