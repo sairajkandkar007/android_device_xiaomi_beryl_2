@@ -14,7 +14,7 @@ on:
         default: "miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   analyze:
@@ -32,6 +32,10 @@ jobs:
         with:
           fetch-depth: 0
 
+
+      # ============================================================
+      # INSTALL TOOLS
+      # ============================================================
 
       - name: Install tools
         shell: bash
@@ -52,31 +56,39 @@ jobs:
             cpio \
             rsync \
             xz-utils \
-            zstd
+            zstd \
+            android-sdk-libsparse-utils
 
           python3 -m pip install \
             --disable-pip-version-check \
             --no-cache-dir \
-            payload-dumper
+            --user \
+            android-payload-dumper==2.3.0
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
 
           echo
-          echo "payload-dumper installed:"
-          command -v payload-dumper
+          echo "===== TOOL CHECK ====="
 
-          echo
-          echo "payload-dumper version:"
-          payload-dumper --version || true
-
-          echo
-          echo "fsck.erofs:"
-          command -v fsck.erofs
-
-          echo
-          echo "aria2:"
           command -v aria2c
+          command -v fsck.erofs
+          command -v simg2img
+          command -v lz4
+          command -v cpio
+          command -v strings
+
+          echo
+          echo "===== PAYLOAD DUMPER ====="
+
+          python3 -m payload_dumper --version
+
+          echo
+          echo "Tools installed successfully."
+
 
       # ============================================================
-      # FIND FASTEST XIAOMI CDN
+      # FASTEST XIAOMI CDN
       # SAME LOGIC AS PREVIOUS WORKFLOW
       # ============================================================
 
@@ -91,7 +103,6 @@ jobs:
           set -euo pipefail
 
           mkdir -p work/benchmark
-
           : > work/benchmark/results.txt
 
           candidates=(
@@ -107,10 +118,11 @@ jobs:
             output="work/benchmark/${name}.bin"
 
             echo
+            echo "========================================"
             echo "Testing: $name"
-            echo "$url"
+            echo "========================================"
 
-            start_ns="$(date +%s%N)"
+            start="$(date +%s)"
 
             if curl \
               -L \
@@ -122,24 +134,23 @@ jobs:
               -o "$output" \
               "$url"; then
 
-              end_ns="$(date +%s%N)"
+              end="$(date +%s)"
 
               bytes="$(stat -c %s "$output")"
 
-              elapsed_ns=$((end_ns - start_ns))
+              elapsed=$((end - start))
 
-              speed="$(python3 - "$bytes" "$elapsed_ns" <<'PY'
-              import sys
+              if [ "$elapsed" -le 0 ]; then
+                elapsed=1
+              fi
 
-                size = int(sys.argv[1])
-               elapsed = int(sys.argv[2])
-
-                if elapsed <= 0:
-                 print("0")
-                 else:
-                  speed = size / 1048576 / (elapsed / 1000000000)
-                    print(f"{speed:.4f}")
-                     PY
+              speed="$(
+                awk \
+                  -v bytes="$bytes" \
+                  -v elapsed="$elapsed" \
+                  'BEGIN {
+                    printf "%.4f", bytes / 1048576 / elapsed
+                  }'
               )"
 
               echo "$speed $url" \
@@ -157,7 +168,9 @@ jobs:
           done
 
           echo
-          echo "===== CDN RESULTS ====="
+          echo "========================================"
+          echo "CDN RESULTS"
+          echo "========================================"
 
           cat work/benchmark/results.txt
 
@@ -183,9 +196,8 @@ jobs:
           echo "BEST_URL=$url" >> "$GITHUB_OUTPUT"
           echo "BEST_SPEED=$speed" >> "$GITHUB_OUTPUT"
 
-
       # ============================================================
-      # DOWNLOAD STOCK ROM
+      # DOWNLOAD ROM
       # SAME ARIA2 LOGIC
       # ============================================================
 
@@ -216,6 +228,7 @@ jobs:
             -o "$ROM_FILENAME" \
             "$ROM_URL"
 
+          echo
           ls -lh "work/rom/$ROM_FILENAME"
 
 
@@ -261,12 +274,107 @@ jobs:
 
 
       # ============================================================
+      # LIST PAYLOAD PARTITIONS
+      #
+      # THIS PREVENTS FAILURE IF A REQUESTED PARTITION IS NOT
+      # PRESENT IN THIS PARTICULAR OTA.
+      # ============================================================
+
+      - name: List payload partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m payload_dumper \
+            work/payload/payload.bin \
+            -l \
+            --json \
+            > work/payload/partitions.json
+
+          cat work/payload/partitions.json
+
+
+      # ============================================================
+      # SELECT PARTITIONS
+      #
+      # SAME TARGETS AS PREVIOUS WORKFLOW.
+      # ODM IS NOT REQUESTED BECAUSE BERYL HAS MERGED ODM.
+      # ============================================================
+
+      - name: Select available partitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+
+          with open("work/payload/partitions.json", "r") as f:
+              data = json.load(f)
+
+          names = set()
+
+          def walk(obj):
+              if isinstance(obj, dict):
+                  for k, v in obj.items():
+                      if k in ("name", "partition", "partition_name"):
+                          if isinstance(v, str):
+                              names.add(v)
+                      walk(v)
+
+              elif isinstance(obj, list):
+                  for item in obj:
+                      walk(item)
+
+          walk(data)
+
+          wanted = [
+              "vendor",
+              "vendor_dlkm",
+              "system",
+              "system_ext",
+              "product",
+              "system_dlkm",
+              "init_boot",
+              "boot",
+              "vendor_boot",
+              "dtbo",
+              "vbmeta",
+              "vbmeta_system",
+              "vbmeta_vendor",
+          ]
+
+          selected = [x for x in wanted if x in names]
+
+          if not selected:
+              raise SystemExit("No requested partitions were found.")
+
+          print("Available requested partitions:")
+
+          for item in selected:
+              print(item)
+
+          with open("work/payload/selected.txt", "w") as f:
+              f.write(" ".join(selected))
+          PY
+
+          echo
+          echo "===== SELECTED ====="
+          cat work/payload/selected.txt
+
+
+      # ============================================================
       # PAYLOAD DUMPER
       #
-      # SAME PAYLOAD LOGIC USED IN THE PREVIOUS WORKFLOW
+      # SAME LOGIC:
       #
-      # ODM IS NOT REQUESTED:
-      # BERYL USES MERGED ODM CONTENT IN VENDOR.
+      # payload.bin
+      #     ↓
+      # payload-dumper
+      #     ↓
+      # selected .img files
+      #
+      # We invoke it through Python so PATH cannot break the job.
       # ============================================================
 
       - name: Extract stock partitions
@@ -276,25 +384,18 @@ jobs:
 
           mkdir -p work/partitions
 
-          payload-dumper \
+          read -r -a PARTITIONS < work/payload/selected.txt
+
+          python3 -m payload_dumper \
             work/payload/payload.bin \
             -o work/partitions \
-            -p \
-              vendor \
-              vendor_dlkm \
-              system \
-              system_ext \
-              product \
-              system_dlkm \
-              init_boot \
-              boot \
-              dtbo \
-              vbmeta \
-              vbmeta_system \
-              vbmeta_vendor
+            -p "${PARTITIONS[@]}" \
+            -j 8
 
           echo
-          echo "===== EXTRACTED PARTITIONS ====="
+          echo "========================================"
+          echo "EXTRACTED PARTITIONS"
+          echo "========================================"
 
           find work/partitions \
             -maxdepth 1 \
@@ -305,8 +406,7 @@ jobs:
 
       # ============================================================
       # EXTRACT FILESYSTEMS
-      #
-      # SAME EROFS METHOD USED FOR VENDOR_DLKMS
+      # SAME EROFS LOGIC USED FOR VENDOR_DLKMS
       # ============================================================
 
       - name: Extract partition filesystems
@@ -317,6 +417,7 @@ jobs:
           mkdir -p work/extracted
 
           extract_partition() {
+
             image="$1"
             name="$2"
 
@@ -341,6 +442,32 @@ jobs:
                 --extract="work/extracted/$name" \
                 "$image"
 
+            elif echo "$type" | grep -qi "Android sparse"; then
+
+              raw="work/extracted/${name}.raw.img"
+
+              simg2img \
+                "$image" \
+                "$raw"
+
+              mountpoint="/mnt/beryl_$name"
+
+              sudo mkdir -p "$mountpoint"
+
+              sudo mount \
+                -o loop,ro \
+                "$raw" \
+                "$mountpoint"
+
+              sudo rsync \
+                -a \
+                "$mountpoint/" \
+                "work/extracted/$name/"
+
+              sudo umount "$mountpoint"
+
+              rm -f "$raw"
+
             elif echo "$type" | grep -qi "ext4"; then
 
               mountpoint="/mnt/beryl_$name"
@@ -361,7 +488,7 @@ jobs:
 
             else
 
-              echo "Unsupported filesystem: $type"
+              echo "No filesystem extraction for: $type"
 
             fi
           }
@@ -498,7 +625,38 @@ jobs:
 
 
       # ============================================================
-      # FIRMWARE REFERENCES
+      # MODULE DEPENDENCIES
+      # ============================================================
+
+      - name: Analyze module dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=============================================="
+            echo "MODULE DEPENDENCIES"
+            echo "=============================================="
+
+            while IFS= read -r dep; do
+
+              echo
+              echo "----- $dep -----"
+
+              cat "$dep"
+
+            done < <(
+              find work/extracted \
+                -type f \
+                -name "modules.dep" \
+                | sort
+            )
+
+          } > work/report/module-dependencies.txt
+
+
+      # ============================================================
+      # FIRMWARE REFERENCES FROM MODULES
       # ============================================================
 
       - name: Analyze module firmware references
@@ -529,7 +687,7 @@ jobs:
 
 
       # ============================================================
-      # FSTAB ANALYSIS
+      # FSTAB
       # ============================================================
 
       - name: Analyze fstab
@@ -578,7 +736,7 @@ jobs:
 
 
       # ============================================================
-      # FBE ANALYSIS
+      # FBE
       # ============================================================
 
       - name: Analyze FBE configuration
@@ -879,6 +1037,33 @@ jobs:
 
 
       # ============================================================
+      # SELINUX
+      # ============================================================
+
+      - name: Analyze SELinux security
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=============================================="
+            echo "SELINUX SECURITY"
+            echo "=============================================="
+
+            grep -RniE \
+              "keymint|keymaster|gatekeeper|keystore|vold|fscrypt" \
+              work/extracted \
+              --include="*.te" \
+              --include="*.cil" \
+              --include="file_contexts*" \
+              --include="service_contexts*" \
+              2>/dev/null \
+              || true
+
+          } > work/report/selinux-security.txt
+
+
+      # ============================================================
       # CRYPTO MODULES
       # ============================================================
 
@@ -904,7 +1089,7 @@ jobs:
 
 
       # ============================================================
-      # FIRMWARE INVENTORY
+      # FIRMWARE
       # ============================================================
 
       - name: Inventory firmware
@@ -1033,15 +1218,15 @@ jobs:
 
             echo
             echo "============================================================"
-            echo "CRYPTO"
-            echo "============================================================"
-            cat work/report/crypto-modules.txt
-
-            echo
-            echo "============================================================"
             echo "SELINUX"
             echo "============================================================"
             cat work/report/selinux-security.txt
+
+            echo
+            echo "============================================================"
+            echo "CRYPTO"
+            echo "============================================================"
+            cat work/report/crypto-modules.txt
 
             echo
             echo "============================================================"
@@ -1057,6 +1242,8 @@ jobs:
 
           } > work/report/MASTER_REPORT.txt
 
+          echo
+          echo "MASTER REPORT:"
           wc -l work/report/MASTER_REPORT.txt
 
 
@@ -1091,5 +1278,6 @@ jobs:
             work/report/
             work/rom.sha256
             work/benchmark/
+            work/payload/partitions.json
             beryl-stock-fbe-keymint-analysis.tar.gz
           retention-days: 7
