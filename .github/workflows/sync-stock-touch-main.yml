@@ -29,23 +29,22 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install -y \
-            aria2 \
-            unzip \
-            zip \
-            p7zip-full \
-            file \
-            lz4 \
-            cpio \
-            e2fsprogs \
-            erofs-utils \
-            android-sdk-libsparse-utils \
-            binutils \
-            grep \
-            sed \
-            awk \
-            jq \
-            python3 \
-            python3-pip
+          aria2 \
+          unzip \
+          zip \
+          p7zip-full \
+          file \
+          lz4 \
+          cpio \
+          e2fsprogs \
+          erofs-utils \
+          android-sdk-libsparse-utils \
+          binutils \
+          grep \
+          sed \
+          jq \
+          python3 \
+          python3-pip
 
           python3 --version
           aria2c --version
