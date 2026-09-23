@@ -1,4 +1,4 @@
-name: Beryl - Full Stock FBE and KeyMint Analysis
+name: Beryl - Full Stock FBE + KeyMint Analysis
 
 on:
   workflow_dispatch:
@@ -19,9 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # INSTALL TOOLS
-      # IMPORTANT:
-      # Do NOT install awk. Ubuntu runner already provides awk/mawk.
+      # INSTALL SYSTEM TOOLS
       # ============================================================
       - name: Install tools
         run: |
@@ -44,9 +42,7 @@ jobs:
             xz-utils \
             zstd
 
-          echo "========================================"
-          echo " TOOL CHECK"
-          echo "========================================"
+          echo "===== TOOL CHECK ====="
 
           command -v aria2c
           command -v python3
@@ -58,26 +54,30 @@ jobs:
 
           python3 --version
           aria2c --version | head -1
-          file --version | head -1
-
-          echo
-          echo "Disk:"
-          df -h /
 
       # ============================================================
-      # INSTALL PAYLOAD DUMPER
+      # INSTALL PYTHON PAYLOAD DUMPER
+      #
+      # IMPORTANT:
+      # Use the Python payload-dumper package.
+      # Do NOT use android_payload_dumper.
       # ============================================================
-      - name: Install payload dumper
+      - name: Install Python payload dumper
         run: |
           set -e
 
-          python3 -m pip install --upgrade pip
-          python3 -m pip install payload-dumper
+          python3 -m pip install \
+            --upgrade \
+            pip
 
-          echo
-          echo "payload-dumper:"
+          python3 -m pip install \
+            payload-dumper
+
+          echo "===== PAYLOAD DUMPER ====="
+
           command -v payload-dumper
-          payload-dumper --help | head -40
+
+          payload-dumper --help
 
       # ============================================================
       # ROM INFORMATION
@@ -95,8 +95,6 @@ jobs:
 
       # ============================================================
       # FAST XIAOMI CDN BENCHMARK
-      #
-      # Uses Python for speed calculation so no awk dependency.
       # ============================================================
       - name: Benchmark Xiaomi CDNs
         id: cdn
@@ -165,7 +163,7 @@ jobs:
               echo "$SPEED|$CDN|$URL" \
                 >> benchmark/results.txt
 
-              IS_BETTER=$(python3 - "$SPEED" "$BEST_SPEED" <<'PY'
+              BETTER=$(python3 - "$SPEED" "$BEST_SPEED" <<'PY'
           import sys
 
           current = float(sys.argv[1])
@@ -175,7 +173,7 @@ jobs:
           PY
           )
 
-              if [ "$IS_BETTER" = "yes" ]; then
+              if [ "$BETTER" = "yes" ]; then
                 BEST_SPEED="$SPEED"
                 BEST_URL="$URL"
               fi
@@ -185,6 +183,7 @@ jobs:
             fi
 
             rm -f benchmark/test.bin
+
           done
 
           if [ -z "$BEST_URL" ]; then
@@ -208,7 +207,10 @@ jobs:
           echo "BEST_SPEED=$BEST_SPEED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # DOWNLOAD STOCK ROM
+      # DOWNLOAD ROM WITH ARIA2
+      #
+      # 16 connections/server
+      # 16 splits
       # ============================================================
       - name: Download stock ROM
         env:
@@ -222,7 +224,6 @@ jobs:
           echo " DOWNLOADING STOCK ROM"
           echo "========================================"
 
-          echo "URL:"
           echo "$ROM_URL"
 
           aria2c \
@@ -243,7 +244,7 @@ jobs:
       # ============================================================
       # VERIFY ROM
       # ============================================================
-      - name: Verify downloaded ROM
+      - name: Verify ROM
         run: |
           set -e
 
@@ -266,15 +267,15 @@ jobs:
           sha256sum "$ROM" | tee rom.sha256
 
           echo
-          echo "ZIP entries related to partitions:"
+          echo "Important ZIP entries:"
           unzip -l "$ROM" \
             | grep -Ei \
-              'payload\.bin|vendor_boot|init_boot|boot\.img|super\.img' \
+              'payload\.bin|vendor_boot|init_boot|boot\.img' \
             | head -100 \
             || true
 
       # ============================================================
-      # EXTRACT PAYLOAD
+      # EXTRACT PAYLOAD.BIN
       # ============================================================
       - name: Extract payload.bin
         run: |
@@ -295,60 +296,13 @@ jobs:
 
           test -f payload/payload.bin
 
+          echo "payload.bin:"
           ls -lh payload/payload.bin
 
       # ============================================================
-      # GET PAYLOAD PARTITION INFORMATION
-      # ============================================================
-      - name: Inspect payload
-        run: |
-          set -e
-
-          mkdir -p report
-
-          echo "========================================"
-          echo " PAYLOAD DUMPER HELP"
-          echo "========================================"
-
-          payload-dumper --help \
-            > report/payload-dumper-help.txt \
-            2>&1 \
-            || true
-
-          cat report/payload-dumper-help.txt
-
-          echo
-          echo "========================================"
-          echo " PAYLOAD PARTITION INFORMATION"
-          echo "========================================"
-
-          python3 - <<'PY' \
-            > report/payload-partitions.txt \
-            2>&1 \
-            || true
-          from pathlib import Path
-
-          p = Path("payload/payload.bin")
-
-          print("payload.bin:")
-          print("size =", p.stat().st_size)
-          print()
-
-          try:
-              from payload_dumper import payload
-              print("payload_dumper Python module detected.")
-              print("Module:", payload)
-          except Exception as e:
-              print("Python payload module inspection unavailable:", e)
-          PY
-
-          cat report/payload-partitions.txt
-
-      # ============================================================
-      # EXTRACT USEFUL STOCK PARTITIONS
+      # EXTRACT STOCK PARTITIONS USING PYTHON PAYLOAD-DUMPER
       #
-      # We intentionally don't assume a separate ODM partition.
-      # Vendor contains the merged vendor/ODM environment.
+      # No separate ODM partition.
       # ============================================================
       - name: Extract stock partitions
         run: |
@@ -357,7 +311,7 @@ jobs:
           mkdir -p extracted
 
           echo "========================================"
-          echo " EXTRACTING STOCK PARTITIONS"
+          echo " PYTHON PAYLOAD-DUMPER"
           echo "========================================"
 
           payload-dumper \
@@ -373,13 +327,16 @@ jobs:
             payload/payload.bin
 
           echo
-          echo "Extracted:"
+          echo "========================================"
+          echo " EXTRACTED PARTITIONS"
+          echo "========================================"
+
           ls -lh extracted
 
       # ============================================================
-      # EXTRACT vendor_boot FROM ROM ZIP
+      # EXTRACT VENDOR_BOOT IF PRESENT IN ROM ZIP
       # ============================================================
-      - name: Extract vendor_boot from ROM
+      - name: Extract vendor_boot from ROM ZIP
         shell: bash
         run: |
           set -e
@@ -392,32 +349,25 @@ jobs:
             -name '*.zip' \
             | head -1)
 
-          echo "Searching ROM ZIP for vendor_boot..."
-
-          unzip -l "$ROM" \
-            | grep -Ei \
-              '(^|/)vendor_boot(\.img)?$|vendor_boot\.img' \
-            || true
-
-          ZIP_ENTRY=$(unzip -Z1 "$ROM" \
+          ENTRY=$(unzip -Z1 "$ROM" \
             | grep -Ei \
               '(^|/)vendor_boot\.img$' \
             | head -1 \
             || true)
 
-          if [ -n "$ZIP_ENTRY" ]; then
+          if [ -n "$ENTRY" ]; then
 
-            echo "Found:"
-            echo "$ZIP_ENTRY"
+            echo "Found vendor_boot:"
+            echo "$ENTRY"
 
             unzip -j \
               "$ROM" \
-              "$ZIP_ENTRY" \
+              "$ENTRY" \
               -d vendor_boot_source
 
           else
 
-            echo "vendor_boot.img not directly found in ROM ZIP."
+            echo "No standalone vendor_boot.img in ROM ZIP."
 
           fi
 
@@ -425,7 +375,7 @@ jobs:
             || true
 
       # ============================================================
-      # GENERIC FILESYSTEM EXTRACTION
+      # EXTRACT PARTITION FILESYSTEMS
       # ============================================================
       - name: Extract partition filesystems
         shell: bash
@@ -440,8 +390,7 @@ jobs:
             NAME="$2"
 
             if [ ! -f "$IMAGE" ]; then
-              echo
-              echo "Skipping missing: $IMAGE"
+              echo "Skipping missing $IMAGE"
               return 0
             fi
 
@@ -483,8 +432,7 @@ jobs:
 
             else
 
-              echo "Unsupported filesystem:"
-              echo "$TYPE"
+              echo "Unsupported filesystem: $TYPE"
 
             fi
           }
@@ -497,11 +445,13 @@ jobs:
           extract_image extracted/system_dlkm.img system_dlkm
 
       # ============================================================
-      # GLOBAL FILE INDEX
+      # COMPLETE FILE INDEX
       # ============================================================
-      - name: Build complete stock file index
+      - name: Build complete file index
         run: |
           set -e
+
+          mkdir -p report
 
           find filesystems \
             \( -type f -o -type l \) \
@@ -509,13 +459,13 @@ jobs:
             | sort \
             > report/all-stock-files.txt
 
-          echo "Total indexed files:"
+          echo "Indexed files:"
           wc -l report/all-stock-files.txt
 
       # ============================================================
-      # FIND ALL FSTAB FILES
+      # FSTAB SCAN
       # ============================================================
-      - name: Scan all stock fstab files
+      - name: Scan all fstab files
         shell: bash
         run: |
           {
@@ -570,9 +520,9 @@ jobs:
           } | tee report/FSTAB_ANALYSIS.txt
 
       # ============================================================
-      # GLOBAL FBE SCAN
+      # FULL FBE SCAN
       # ============================================================
-      - name: Scan complete stock ROM for FBE
+      - name: Scan complete ROM for FBE
         shell: bash
         run: |
           {
@@ -590,7 +540,7 @@ jobs:
               || true
 
             echo
-            echo "----- ENCRYPTION RELATED FILES -----"
+            echo "----- FBE RELATED FILES -----"
 
             find filesystems \
               -type f \
@@ -600,7 +550,7 @@ jobs:
               || true
 
             echo
-            echo "----- ENCRYPTION PROPERTIES -----"
+            echo "----- FBE PROPERTIES -----"
 
             grep -RniE \
               'ro\.crypto|ro\.security|ro\.fscrypt|vold.*encrypt|fbe' \
@@ -625,7 +575,7 @@ jobs:
             echo "=================================================="
 
             echo
-            echo "----- SECURITY COMPONENT FILES -----"
+            echo "----- FILES -----"
 
             find filesystems \
               -type f \
@@ -635,7 +585,7 @@ jobs:
               || true
 
             echo
-            echo "----- SECURITY COMPONENT DIRECTORIES -----"
+            echo "----- DIRECTORIES -----"
 
             find filesystems \
               -type d \
@@ -648,7 +598,7 @@ jobs:
             echo "----- KEYMINT REFERENCES -----"
 
             grep -RniE \
-              'android\.hardware\.security\.keymint|IKeyMint|keymint-service|keymint' \
+              'android\.hardware\.security\.keymint|IKeyMint|IKeyMintDevice|keymint-service|keymint' \
               filesystems \
               2>/dev/null \
               || true
@@ -685,7 +635,7 @@ jobs:
             echo "=================================================="
 
             echo
-            echo "----- AIDL KEYMINT -----"
+            echo "----- KEYMINT HAL -----"
 
             grep -RniE \
               'android\.hardware\.security\.keymint' \
@@ -712,7 +662,7 @@ jobs:
               || true
 
             echo
-            echo "----- VERSION STRINGS -----"
+            echo "----- KEYMINT VERSION STRINGS -----"
 
             grep -RniE \
               'keymint[^[:cntrl:]]{0,100}(v[0-9]+|[0-9]+\.[0-9]+|version)' \
@@ -721,7 +671,7 @@ jobs:
               || true
 
             echo
-            echo "----- HIDL KEYMASTER -----"
+            echo "----- KEYMASTER HIDL -----"
 
             grep -RniE \
               'android\.hardware\.keymaster@|IKeymasterDevice' \
@@ -734,7 +684,7 @@ jobs:
       # ============================================================
       # VINTF
       # ============================================================
-      - name: Scan VINTF manifests
+      - name: Scan VINTF
         shell: bash
         run: |
           {
@@ -756,7 +706,7 @@ jobs:
               | sort
 
             echo
-            echo "----- KEYMINT / KEYMASTER / GATEKEEPER -----"
+            echo "----- SECURITY HALS -----"
 
             grep -RniE \
               'keymint|keymaster|gatekeeper|android\.hardware\.security' \
@@ -765,20 +715,18 @@ jobs:
               || true
 
             echo
-            echo "----- HAL FORMAT -----"
+            echo "----- AIDL / HIDL -----"
 
             grep -RniE \
-              'format="aidl"|format="hidl"|<hal>' \
+              'format="aidl"|format="hidl"' \
               filesystems \
               2>/dev/null \
-              | grep -Ei \
-                'keymint|keymaster|gatekeeper|format=' \
               || true
 
           } | tee report/VINTF_SECURITY.txt
 
       # ============================================================
-      # VOLD / INIT / KEYSTORE
+      # VOLD / KEYSTORE / INIT
       # ============================================================
       - name: Scan vold and security services
         shell: bash
@@ -789,7 +737,7 @@ jobs:
             echo "=================================================="
 
             echo
-            echo "----- BINARIES -----"
+            echo "----- SECURITY BINARIES -----"
 
             find filesystems \
               -type f \
@@ -808,7 +756,7 @@ jobs:
               || true
 
             echo
-            echo "----- VOLD REFERENCES -----"
+            echo "----- VOLD / FSCRYPT REFERENCES -----"
 
             grep -RniE \
               'vold|fscrypt|cryptfs' \
@@ -845,15 +793,18 @@ jobs:
           } | tee report/SELINUX_SECURITY.txt
 
       # ============================================================
-      # KERNEL / CRYPTO MODULE SCAN
+      # KERNEL CRYPTO / FSCRYPT MODULES
       # ============================================================
-      - name: Scan kernel crypto and fscrypt modules
+      - name: Scan crypto and fscrypt modules
         shell: bash
         run: |
           {
             echo "=================================================="
-            echo " KERNEL CRYPTO / FSCRYPT MODULES"
+            echo " KERNEL CRYPTO / FSCRYPT"
             echo "=================================================="
+
+            echo
+            echo "----- ALL MODULES -----"
 
             find filesystems \
               -type f \
@@ -861,7 +812,7 @@ jobs:
               | sort
 
             echo
-            echo "----- CRYPTO / FBE RELATED -----"
+            echo "----- CRYPTO / FSCRYPT RELATED -----"
 
             find filesystems \
               -type f \
@@ -874,14 +825,14 @@ jobs:
           } | tee report/KERNEL_CRYPTO.txt
 
       # ============================================================
-      # SECURITY LIBRARY / BINARY INVENTORY
+      # SECURITY COMPONENT INVENTORY
       # ============================================================
-      - name: Inventory security binaries and libraries
+      - name: Security component inventory
         shell: bash
         run: |
           {
             echo "=================================================="
-            echo " SECURITY BINARIES AND LIBRARIES"
+            echo " SECURITY COMPONENT INVENTORY"
             echo "=================================================="
 
             find filesystems \
@@ -894,7 +845,7 @@ jobs:
           } | tee report/SECURITY_COMPONENTS.txt
 
       # ============================================================
-      # EXTRACT STRINGS FROM KEYMINT BINARIES
+      # EXTRACT KEYMINT STRINGS
       # ============================================================
       - name: Extract KeyMint binary strings
         shell: bash
@@ -942,49 +893,57 @@ jobs:
             echo "ROM: OS1.0.4.0.UOQINXM"
             echo "Android userspace: Android 14"
             echo
-            echo "IMPORTANT:"
-            echo "This device does NOT use a separate ODM partition."
+            echo "ODM MODEL:"
+            echo "No separate ODM partition."
             echo "ODM content is merged into vendor."
             echo
             echo "============================================================"
             echo " FSTAB"
             echo "============================================================"
             cat report/FSTAB_ANALYSIS.txt
+
             echo
             echo "============================================================"
             echo " FBE"
             echo "============================================================"
             cat report/FBE_ANALYSIS.txt
+
             echo
             echo "============================================================"
             echo " KEYMINT"
             echo "============================================================"
             cat report/KEYMINT_ANALYSIS.txt
+
             echo
             echo "============================================================"
             echo " KEYMINT VERSION"
             echo "============================================================"
             cat report/KEYMINT_VERSION.txt
+
             echo
             echo "============================================================"
             echo " VINTF"
             echo "============================================================"
             cat report/VINTF_SECURITY.txt
+
             echo
             echo "============================================================"
-            echo " VOLD"
+            echo " VOLD / SECURITY"
             echo "============================================================"
             cat report/VOLD_SECURITY.txt
+
             echo
             echo "============================================================"
             echo " SELINUX"
             echo "============================================================"
             cat report/SELINUX_SECURITY.txt
+
             echo
             echo "============================================================"
             echo " KERNEL CRYPTO"
             echo "============================================================"
             cat report/KERNEL_CRYPTO.txt
+
             echo
             echo "============================================================"
             echo " SECURITY COMPONENTS"
@@ -993,12 +952,11 @@ jobs:
 
           } > report/MASTER_FBE_KEYMINT_REPORT.txt
 
-          echo
-          echo "Master report generated:"
+          echo "Master report:"
           wc -l report/MASTER_FBE_KEYMINT_REPORT.txt
 
       # ============================================================
-      # PACKAGE REPORT
+      # PACKAGE EVERYTHING
       # ============================================================
       - name: Package analysis
         run: |
