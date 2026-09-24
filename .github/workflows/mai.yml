@@ -1,262 +1,154 @@
-name: Build Beryl OrangeFox with Stock FBE Security Stack
+name: Beryl FBE Decryption Integration
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  integrate:
+  integrate-fbe:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
-    env:
-      ROM_VERSION: OS1.0.4.0.UOQINXM
-      ROM_FILENAME: miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
-      ROM_URL: https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
-
-      # Current expected OrangeFox ramdisk root.
-      RECOVERY_ROOT: recovery/root
 
     steps:
-
       # ============================================================
-      # 1. CHECKOUT
+      # 1. CHECKOUT MAIN
       # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout device tree
         uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0
+          ref: main
 
       # ============================================================
-      # 2. INSTALL REQUIRED TOOLS
+      # 2. INSTALL TOOLS
+      # Keep base tool/download logic
       # ============================================================
-
-      - name: Install required tools
-        shell: bash
+      - name: Install tools
         run: |
-          set -e
-
           sudo apt-get update
-
           sudo apt-get install -y \
             aria2 \
-            e2fsprogs \
-            erofs-utils \
-            p7zip-full \
             unzip \
+            p7zip-full \
+            python3 \
             python3-pip \
-            lz4
+            file \
+            cpio \
+            lz4 \
+            e2fsprogs \
+            rsync \
+            binutils
 
           python3 -m pip install --upgrade pip
           python3 -m pip install android-payload-dumper==2.3.0
 
-          echo "Installed tools:"
-          command -v aria2c
-          command -v fsck.erofs
-          command -v debugfs
-          command -v unzip
-          command -v lz4
-          command -v 7z
-          python3 -m payload_dumper --help || true
-
-
       # ============================================================
-      # 3. CREATE WORKSPACE
+      # 3. WORKSPACE
       # ============================================================
-
       - name: Create workspace
-        shell: bash
         run: |
-          set -e
-
-          rm -rf work
-
-          mkdir -p \
-            work/download \
-            work/rom \
-            work/payload \
-            work/partitions \
-            work/rootfs \
-            work/analysis \
-            work/logs
-
-          echo "Workspace created."
-
+          mkdir -p work/{rom,payload,partitions,extracted,rootfs,analysis}
+          mkdir -p work/integration
+          mkdir -p work/integration/vendor
+          mkdir -p work/integration/modules
+          mkdir -p work/integration/sepolicy
 
       # ============================================================
-      # 4. SHOW ROM INFORMATION
+      # 4. STOCK ROM INFO
       # ============================================================
-
-      - name: Show ROM information
-        shell: bash
+      - name: Set ROM information
         run: |
-          set -e
-
-          {
-            echo "ROM_VERSION: $ROM_VERSION"
-            echo "ROM_FILENAME: $ROM_FILENAME"
-            echo "ROM_URL: $ROM_URL"
-          } | tee work/analysis/ROM_INFO.txt
-
+          echo "ROM_NAME=miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip" >> "$GITHUB_ENV"
+          echo "ROM_URL=https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 5. BENCHMARK XIAOMI CDN
+      # 5. CDN BENCHMARK
       # ============================================================
-
-      - name: Benchmark ROM CDN
-        shell: bash
+      - name: Benchmark CDN
         run: |
-          set -e
-
-          URL="$ROM_URL"
-
-          echo "Testing ROM URL..."
-          echo "$URL"
-
-          START=$(date +%s)
-
-          curl -L \
-            --range 0-10485759 \
-            --output /dev/null \
-            --silent \
-            --show-error \
-            "$URL"
-
-          END=$(date +%s)
-
-          ELAPSED=$((END - START))
-
-          if [ "$ELAPSED" -lt 1 ]; then
-            ELAPSED=1
-          fi
-
-          echo "Benchmark completed in ${ELAPSED}s"
-
-
-      # ============================================================
-      # 6. DOWNLOAD ROM
-      # ============================================================
-
-      - name: Download stock ROM
-        shell: bash
-        run: |
-          set -e
-
           aria2c \
+            --dry-run=true \
+            --check-integrity=true \
             --max-connection-per-server=16 \
             --split=16 \
-            --min-split-size=10M \
+            "$ROM_URL" || true
+
+      # ============================================================
+      # 6. DOWNLOAD STOCK ROM
+      # ============================================================
+      - name: Download stock ROM
+        run: |
+          aria2c \
             --continue=true \
-            --allow-overwrite=false \
+            --check-integrity=true \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=1M \
             --file-allocation=none \
-            --console-log-level=notice \
-            --dir=work/download \
-            --out="$ROM_FILENAME" \
+            --summary-interval=10 \
+            --dir=work/rom \
+            --out="$ROM_NAME" \
             "$ROM_URL"
-
-          ls -lh "work/download/$ROM_FILENAME"
-
 
       # ============================================================
       # 7. VERIFY ROM
       # ============================================================
-
-      - name: Verify downloaded ROM
-        shell: bash
+      - name: Verify ROM
         run: |
-          set -e
+          sha256sum "work/rom/$ROM_NAME" \
+            > work/analysis/rom.sha256
 
-          ROM="work/download/$ROM_FILENAME"
-
-          test -f "$ROM"
-
-          echo "ROM size:"
-          stat -c '%s bytes' "$ROM"
-
-          echo
-          echo "ROM SHA256:"
-          sha256sum "$ROM" | tee work/logs/rom.sha256
-
+          unzip -t "work/rom/$ROM_NAME"
 
       # ============================================================
-      # 8. EXTRACT COMPLETE ROM ZIP
+      # 8. COMPLETE ZIP EXTRACTION
+      # Do not replace with selective extraction
       # ============================================================
-
-      - name: Extract complete ROM ZIP
-        shell: bash
+      - name: Extract complete ROM
         run: |
-          set -e
+          mkdir -p work/rom/extracted
 
-          ROM="work/download/$ROM_FILENAME"
-
-          rm -rf work/rom/*
-          unzip -q "$ROM" -d work/rom
-
-          echo "ROM contents:"
-          find work/rom -maxdepth 3 -type f | sort | head -200
-
+          unzip -q \
+            "work/rom/$ROM_NAME" \
+            -d work/rom/extracted
 
       # ============================================================
-      # 9. FIND PAYLOAD.BIN
+      # 9. FIND PAYLOAD
       # ============================================================
-
-      - name: Find payload.bin
-        shell: bash
+      - name: Locate payload
         run: |
-          set -e
+          PAYLOAD_PATH="$(find work/rom/extracted \
+            -type f \
+            -name payload.bin \
+            -print -quit)"
 
-          PAYLOAD_FOUND=$(find work/rom -type f -name payload.bin -print -quit)
-
-          if [ -z "$PAYLOAD_FOUND" ]; then
-            echo "ERROR: payload.bin was not found in the ROM."
-            echo
-            echo "ROM files:"
-            find work/rom -type f | sort
+          if [ -z "$PAYLOAD_PATH" ]; then
+            echo "payload.bin not found"
             exit 1
           fi
 
-          echo "Found payload.bin:"
-          echo "$PAYLOAD_FOUND"
-
-          cp "$PAYLOAD_FOUND" work/payload/payload.bin
-
-          echo
-          echo "Copied payload:"
-          ls -lh work/payload/payload.bin
+          cp "$PAYLOAD_PATH" work/payload/payload.bin
 
           sha256sum work/payload/payload.bin \
-            | tee work/logs/payload.sha256
-
+            > work/analysis/payload.sha256
 
       # ============================================================
-      # 10. LIST PAYLOAD PARTITIONS
+      # 10. LIST PAYLOAD
       # ============================================================
-
       - name: List payload partitions
-        shell: bash
         run: |
-          set -e
-
           python3 -m payload_dumper \
             work/payload/payload.bin \
             -l \
-            | tee work/logs/payload_partitions.txt
-
+            > work/analysis/payload_partitions.txt
 
       # ============================================================
-      # 11. EXTRACT STOCK PARTITIONS
-      #
-      # IMPORTANT:
-      # This payload logic is unchanged.
+      # 11. EXTRACT PARTITIONS
+      # Preserve this list and -j 8
       # ============================================================
-
-      - name: Extract stock partitions
-        shell: bash
+      - name: Extract required partitions
         run: |
-          set -e
-
           python3 -m payload_dumper \
             work/payload/payload.bin \
             -o work/partitions \
@@ -276,824 +168,903 @@ jobs:
               vbmeta_vendor \
             -j 8
 
-          echo
-          echo "Extracted partitions:"
-          find work/partitions -maxdepth 1 -type f -printf '%f %s bytes\n' \
-            | sort \
-            | tee work/logs/extracted_partitions.txt
-
-
       # ============================================================
-      # 12. IDENTIFY FILESYSTEMS
+      # 12. EXTRACT EROFS FILESYSTEMS
       # ============================================================
-
-      - name: Identify partition filesystems
-        shell: bash
-        run: |
-          set -e
-
-          {
-            echo "=== FILESYSTEM IDENTIFICATION ==="
-            echo
-
-            for IMG in work/partitions/*.img; do
-              [ -f "$IMG" ] || continue
-
-              echo "===== $IMG ====="
-              file "$IMG" || true
-              echo
-
-              fsck.erofs --print-superblock "$IMG" 2>/dev/null || true
-              echo
-            done
-
-          } | tee work/logs/filesystems.txt
-
-
-      # ============================================================
-      # 13. EXTRACT EROFS PARTITIONS
-      # ============================================================
-
       - name: Extract EROFS partitions
         shell: bash
         run: |
-          set -e
+          set +e
 
-          extract_erofs() {
-            local NAME="$1"
-            local IMG="work/partitions/${NAME}.img"
-            local OUT="work/rootfs/${NAME}"
+          for p in \
+            vendor \
+            vendor_dlkm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product
+          do
+            IMG="$PWD/work/partitions/$p.img"
+            OUT="$PWD/work/extracted/$p"
 
-            if [ ! -f "$IMG" ]; then
-              echo "Skipping missing $NAME"
-              return 0
-            fi
-
-            echo
-            echo "========================================"
-            echo "Extracting EROFS: $NAME"
-            echo "========================================"
+            [ -f "$IMG" ] || continue
 
             mkdir -p "$OUT"
 
             fsck.erofs \
-              --extract="$PWD/$OUT" \
+              --extract="$OUT" \
               "$IMG"
-          }
 
-          extract_erofs vendor
-          extract_erofs vendor_dlkm
-          extract_erofs odm_dlkm
-          extract_erofs system
-          extract_erofs system_ext
-          extract_erofs product
+            echo "$p extraction result: $?"
+          done
 
-          echo
-          echo "EROFS extraction completed."
-
+          exit 0
 
       # ============================================================
-      # 14. CREATE COMBINED ROOTFS VIEW
+      # 13. BUILD SEARCH ROOT
       # ============================================================
-
-      - name: Create combined rootfs view
-        shell: bash
+      - name: Build stock search root
         run: |
-          set -e
+          for p in \
+            vendor \
+            vendor_dlkm \
+            odm_dlkm \
+            system \
+            system_ext \
+            product
+          do
+            if [ -d "work/extracted/$p" ]; then
+              mkdir -p "work/rootfs/$p"
 
-          ROOT="work/rootfs/combined"
-
-          rm -rf "$ROOT"
-          mkdir -p "$ROOT"
-
-          for PART in vendor system system_ext product; do
-            if [ -d "work/rootfs/$PART" ]; then
-              mkdir -p "$ROOT/$PART"
-              cp -a "work/rootfs/$PART/." "$ROOT/$PART/"
+              rsync -a \
+                "work/extracted/$p/" \
+                "work/rootfs/$p/"
             fi
           done
 
-          echo "Combined rootfs created."
-
-
       # ============================================================
-      # 15. CREATE FBE INTEGRATION STAGING TREE
+      # 14. LOCATE EXACT DECRYPTION ROOT COMPONENTS
       # ============================================================
-
-      - name: Create FBE integration staging tree
+      - name: Locate FBE security roots
         shell: bash
         run: |
-          set -e
-
-          rm -rf work/recovery_integration
-
-          mkdir -p \
-            work/recovery_integration/vendor/bin \
-            work/recovery_integration/vendor/bin/hw \
-            work/recovery_integration/vendor/lib \
-            work/recovery_integration/vendor/lib64 \
-            work/recovery_integration/vendor/etc/init \
-            work/recovery_integration/vendor/etc/vintf/manifest \
-            work/recovery_integration/system/bin \
-            work/recovery_integration/system/lib \
-            work/recovery_integration/system/lib64 \
-            work/recovery_integration/system/etc/init \
-            work/recovery_integration/system/etc/vintf/manifest
-
-          : > work/analysis/fbe_integration_manifest.txt
-          : > work/logs/fbe_integration_missing.txt
-
-
-      # ============================================================
-      # 16. COLLECT STOCK FBE / KEYMINT / TEE COMPONENTS
-      # ============================================================
-
-      - name: Collect stock FBE security components
-        shell: bash
-        run: |
-          set -e
-
           ROOT="$PWD/work/rootfs"
-          STAGE="$PWD/work/recovery_integration"
+          OUT="$PWD/work/analysis/security-roots.txt"
 
-          copy_if_exists() {
-            local REL="$1"
-            local SRC="$ROOT/$REL"
-            local DST="$STAGE/$REL"
+          : > "$OUT"
 
-            if [ -f "$SRC" ]; then
-              mkdir -p "$(dirname "$DST")"
-              cp -a "$SRC" "$DST"
+          find "$ROOT" -type f \
+            \( \
+              -name 'android.hardware.security.keymint@1.0-service.mitee' \
+              -o -name 'android.hardware.gatekeeper@1.0-service.mitee' \
+              -o -name 'tee-supplicant' \
+              -o -name 'gatekeeper.mitee.so' \
+              -o -name 'libkeymint.so' \
+              -o -name 'libkeymint_support.so' \
+              -o -name 'libkeymaster4support.so' \
+              -o -name 'libkeymaster_messages.so' \
+              -o -name 'lib_android_keymaster_keymint_utils.so' \
+              -o -name 'libmt_mitee.so' \
+              -o -name 'libteecli.so' \
+              -o -name 'libteeservice_client.trustonic.so' \
+              -o -name 'vendor.trustonic.tee@1.0.so' \
+              -o -name 'vendor.trustonic.tee@1.1.so' \
+              -o -name 'gz_trusty_mod.ko' \
+              -o -name 'gz_tz_system.ko' \
+            \) \
+            -print | sort -u > "$OUT"
 
-              echo "$REL -> $REL" \
-                | tee -a work/analysis/fbe_integration_manifest.txt
-            else
-              echo "MISSING: $REL" \
-                | tee -a work/logs/fbe_integration_missing.txt
-            fi
+          echo "=== SECURITY ROOTS ==="
+          cat "$OUT"
+
+      # ============================================================
+      # 15. RECURSIVE ELF DEPENDENCY RESOLVER
+      #
+      # Starts only from actual FBE security components.
+      # Does NOT start from every file containing "mitee".
+      # ============================================================
+      - name: Resolve recursive ELF dependencies
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+          from collections import deque
+
+          root = Path("work/rootfs").resolve()
+          roots_file = Path("work/analysis/security-roots.txt")
+
+          # Libraries supplied by Android/recovery itself should not
+          # automatically cause random stock platform copies.
+          platform_libs = {
+              "libc.so",
+              "libm.so",
+              "libdl.so",
+              "liblog.so",
+              "libc++.so",
+              "libutils.so",
+              "libcutils.so",
+              "libbase.so",
+              "libz.so",
+              "libprocessgroup.so",
+              "libselinux.so",
           }
 
-          echo "=== STOCK FBE SECURITY COMPONENTS ===" \
-            | tee work/analysis/fbe_integration_manifest.txt
+          index = {}
 
-          # TEE
-          copy_if_exists vendor/bin/tee-supplicant
+          print("Indexing stock filesystem...")
 
-          # Mitee KeyMint / Gatekeeper services
-          copy_if_exists vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
-          copy_if_exists vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
+          for p in root.rglob("*"):
+              if p.is_file() or p.is_symlink():
+                  index.setdefault(p.name, []).append(p)
 
-          # KeyMint / Keymaster
-          copy_if_exists vendor/lib64/libkeymint.so
-          copy_if_exists vendor/lib64/libkeymint_support.so
-          copy_if_exists vendor/lib64/libkeymaster4support.so
-          copy_if_exists vendor/lib64/libkeymaster_messages.so
-          copy_if_exists vendor/lib64/lib_android_keymaster_keymint_utils.so
+          seeds = []
 
-          # Gatekeeper
-          copy_if_exists vendor/lib64/hw/gatekeeper.mitee.so
+          for line in roots_file.read_text().splitlines():
+              line = line.strip()
 
-          # Trustonic
-          copy_if_exists vendor/lib64/vendor.trustonic.tee@1.0.so
-          copy_if_exists vendor/lib64/vendor.trustonic.tee@1.1.so
-          copy_if_exists vendor/lib64/libteeservice_client.trustonic.so
-
-          # Mitee libraries identified in the stock analysis
-          copy_if_exists vendor/lib64/libteecli.so
-          copy_if_exists vendor/lib64/libmt_mitee.so
-          copy_if_exists vendor/lib64/libtida_mitee@1.2.so
-          copy_if_exists vendor/lib64/libmfido_mitee.so
-          copy_if_exists vendor/lib64/libmlipay_mitee.so
-
-          echo
-          echo "=== SELECTED COMPONENTS ==="
-          cat work/analysis/fbe_integration_manifest.txt
-
-          echo
-          echo "=== MISSING COMPONENTS ==="
-          cat work/logs/fbe_integration_missing.txt || true
-
-
-      # ============================================================
-      # 17. COLLECT SECURITY INIT FILES
-      # ============================================================
-
-      - name: Collect FBE security init files
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="$PWD/work/rootfs"
-          STAGE="$PWD/work/recovery_integration"
-
-          : > work/analysis/fbe_init_manifest.txt
-
-          for BASE in \
-            "$ROOT/vendor/etc/init" \
-            "$ROOT/system/etc/init"; do
-
-            [ -d "$BASE" ] || continue
-
-            find "$BASE" -type f 2>/dev/null \
-              | sort \
-              | while read -r F; do
-
-                if grep -aEqi \
-                  'keymint|keymaster|gatekeeper|tee-supplicant|trustonic|mitee|mobicore|keystore2|vold' \
-                  "$F" 2>/dev/null
-                then
-                  REL="${F#$ROOT/}"
-                  DST="$STAGE/$REL"
-
-                  mkdir -p "$(dirname "$DST")"
-                  cp -a "$F" "$DST"
-
-                  echo "$REL -> $REL" \
-                    | tee -a work/analysis/fbe_init_manifest.txt
-                fi
-
-              done
-
-          done
-
-          echo
-          echo "=== INIT FILES ==="
-          cat work/analysis/fbe_init_manifest.txt || true
-
-
-      # ============================================================
-      # 18. COLLECT VINTF DECLARATIONS
-      # ============================================================
-
-      - name: Collect KeyMint Gatekeeper VINTF declarations
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="$PWD/work/rootfs"
-          STAGE="$PWD/work/recovery_integration"
-
-          : > work/analysis/fbe_vintf_manifest.txt
-
-          for BASE in \
-            "$ROOT/vendor/etc/vintf" \
-            "$ROOT/system/etc/vintf"; do
-
-            [ -d "$BASE" ] || continue
-
-            find "$BASE" -type f 2>/dev/null \
-              | sort \
-              | while read -r F; do
-
-                if grep -aEqi \
-                  'keymint|keymaster|gatekeeper|tee|mitee' \
-                  "$F" 2>/dev/null
-                then
-                  REL="${F#$ROOT/}"
-                  DST="$STAGE/$REL"
-
-                  mkdir -p "$(dirname "$DST")"
-                  cp -a "$F" "$DST"
-
-                  echo "$REL -> $REL" \
-                    | tee -a work/analysis/fbe_vintf_manifest.txt
-                fi
-
-              done
-
-          done
-
-          echo
-          echo "=== VINTF FILES ==="
-          cat work/analysis/fbe_vintf_manifest.txt || true
-
-
-      # ============================================================
-      # 19. RESOLVE ELF DEPENDENCIES
-      # ============================================================
-
-      - name: Resolve FBE ELF dependencies
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="$PWD/work/rootfs"
-          STAGE="$PWD/work/recovery_integration"
-
-          : > work/analysis/fbe_elf_dependency_manifest.txt
-          : > work/logs/fbe_missing_elf_dependencies.txt
-
-          find_library() {
-            local NAME="$1"
-
-            find \
-              "$ROOT/vendor/lib64" \
-              "$ROOT/vendor/lib" \
-              "$ROOT/system/lib64" \
-              "$ROOT/system/lib" \
-              "$ROOT/system_ext/lib64" \
-              "$ROOT/system_ext/lib" \
-              "$ROOT/product/lib64" \
-              "$ROOT/product/lib" \
-              -type f \
-              -name "$NAME" \
-              -print -quit \
-              2>/dev/null || true
-          }
-
-          declare -A SEEN
-
-          resolve_elf() {
-            local ELF="$1"
-
-            [ -f "$ELF" ] || return 0
-
-            [ "${SEEN[$ELF]+x}" = x ] && return 0
-            SEEN[$ELF]=1
-
-            if ! file "$ELF" 2>/dev/null | grep -qi ELF; then
-              return 0
-            fi
-
-            readelf -d "$ELF" 2>/dev/null \
-              | awk -F'[][]' '/NEEDED/ {print $2}' \
-              | sort -u \
-              | while read -r DEP; do
-
-                [ -n "$DEP" ] || continue
-
-                FOUND=$(find_library "$DEP")
-
-                if [ -z "$FOUND" ]; then
-                  echo "$DEP <- $ELF" \
-                    | tee -a work/logs/fbe_missing_elf_dependencies.txt
+              if not line:
                   continue
-                fi
 
-                REL="${FOUND#$ROOT/}"
-                DST="$STAGE/$REL"
+              p = Path(line)
 
-                mkdir -p "$(dirname "$DST")"
+              if p.suffix == ".ko":
+                  continue
 
-                if [ ! -f "$DST" ]; then
-                  cp -a "$FOUND" "$DST"
+              if p.exists():
+                  seeds.append(p.resolve())
 
-                  echo "$REL -> $REL (dependency)" \
-                    | tee -a work/analysis/fbe_elf_dependency_manifest.txt
-                fi
+          queue = deque(seeds)
+          visited = set()
+          resolved = set()
+          missing = set()
 
-                resolve_elf "$FOUND"
+          def needed(path):
+              try:
+                  proc = subprocess.run(
+                      ["readelf", "-d", str(path)],
+                      text=True,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL,
+                  )
+              except Exception:
+                  return []
 
-              done
+              result = []
+
+              for line in proc.stdout.splitlines():
+                  m = re.search(r"Shared library: \[(.+?)\]", line)
+                  if m:
+                      result.append(m.group(1))
+
+              return result
+
+          while queue:
+              f = queue.popleft()
+
+              try:
+                  key = str(f.resolve())
+              except Exception:
+                  key = str(f)
+
+              if key in visited:
+                  continue
+
+              visited.add(key)
+              resolved.add(f)
+
+              for lib in needed(f):
+
+                  if lib in platform_libs:
+                      continue
+
+                  candidates = index.get(lib, [])
+
+                  if not candidates:
+                      missing.add((str(f), lib))
+                      continue
+
+                  # Prefer vendor, then odm, then system_ext/product/system.
+                  def rank(p):
+                      s = str(p)
+
+                      if "/vendor/" in s:
+                          return 0
+                      if "/odm" in s:
+                          return 1
+                      if "/system_ext/" in s:
+                          return 2
+                      if "/product/" in s:
+                          return 3
+                      return 4
+
+                  target = sorted(candidates, key=rank)[0]
+
+                  if str(target.resolve()) not in visited:
+                      queue.append(target.resolve())
+
+          with open(
+              "work/analysis/resolved-elf-files.txt", "w"
+          ) as out:
+              for f in sorted(resolved, key=str):
+                  out.write(str(f) + "\n")
+
+          with open(
+              "work/analysis/missing-elf-dependencies.txt", "w"
+          ) as out:
+              for parent, lib in sorted(missing):
+                  out.write(f"{parent} -> {lib}\n")
+
+          print()
+          print("Resolved:", len(resolved))
+          print("Missing:", len(missing))
+          PY
+
+      # ============================================================
+      # 16. COPY RESOLVED ELF COMPONENTS
+      # ============================================================
+      - name: Copy resolved decryption ELF files
+        shell: bash
+        run: |
+          ROOT="$PWD/work/rootfs"
+          DEST="$PWD/work/integration"
+
+          while IFS= read -r FILE; do
+            [ -f "$FILE" ] || continue
+
+            REL="${FILE#"$ROOT"/}"
+
+            mkdir -p "$DEST/$(dirname "$REL")"
+
+            cp -a \
+              "$FILE" \
+              "$DEST/$REL"
+
+          done < work/analysis/resolved-elf-files.txt
+
+      # ============================================================
+      # 17. MODULE DEPENDENCY RESOLVER
+      #
+      # Resolve dependencies for TEE modules through modules.dep.
+      # ============================================================
+      - name: Resolve TEE kernel modules
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from collections import deque
+
+          root = Path("work/rootfs")
+
+          module_roots = {
+              "gz_trusty_mod.ko",
+              "gz_tz_system.ko",
           }
 
-          find "$STAGE" \
-            -type f \
-            \( -name '*.so' -o -name '*.so.*' \) \
-            -print \
-            | while read -r ELF; do
-                resolve_elf "$ELF"
-              done
+          all_modules = {}
 
-          echo
-          echo "=== RESOLVED DEPENDENCIES ==="
-          cat work/analysis/fbe_elf_dependency_manifest.txt || true
+          for f in root.rglob("*.ko"):
+              all_modules[f.name] = f
 
-          echo
-          echo "=== MISSING DEPENDENCIES ==="
-          cat work/logs/fbe_missing_elf_dependencies.txt || true
+          dep_files = list(root.rglob("modules.dep"))
 
+          dependencies = {}
+
+          for depfile in dep_files:
+              for line in depfile.read_text(
+                  errors="ignore"
+              ).splitlines():
+
+                  if ":" not in line:
+                      continue
+
+                  module, deps = line.split(":", 1)
+
+                  module_name = Path(module.strip()).name
+
+                  dependencies[module_name] = [
+                      Path(x).name
+                      for x in deps.split()
+                  ]
+
+          queue = deque(module_roots)
+          selected = set()
+
+          while queue:
+              module = queue.popleft()
+
+              if module in selected:
+                  continue
+
+              if module not in all_modules:
+                  continue
+
+              selected.add(module)
+
+              for dep in dependencies.get(module, []):
+                  if dep not in selected:
+                      queue.append(dep)
+
+          with open(
+              "work/analysis/resolved-modules.txt", "w"
+          ) as out:
+              for module in sorted(selected):
+                  out.write(str(all_modules[module]) + "\n")
+
+          print("Resolved modules:", len(selected))
+          for m in sorted(selected):
+              print(m)
+          PY
 
       # ============================================================
-      # 20. VERIFY STAGED ELF FILES
+      # 18. COPY MODULES
       # ============================================================
-
-      - name: Verify staged security binaries
+      - name: Copy resolved TEE modules
         shell: bash
         run: |
-          set -e
-
-          {
-            echo "=== STAGED FBE SECURITY FILES ==="
-            echo
-
-            find work/recovery_integration \
-              -type f \
-              -printf '%p %s bytes\n' \
-              | sort
-
-            echo
-            echo "=== ELF FILES ==="
-
-            find work/recovery_integration \
-              -type f \
-              -print \
-              | while read -r F; do
-
-                if file "$F" 2>/dev/null | grep -qi ELF; then
-                  echo
-                  echo "===== $F ====="
-
-                  file "$F" || true
-
-                  readelf -d "$F" 2>/dev/null \
-                    | grep -E 'NEEDED|RPATH|RUNPATH' \
-                    || true
-                fi
-
-              done
-
-          } | tee work/analysis/staged_security_verification.txt
-
-
-      # ============================================================
-      # 21. COLLECT STOCK FBE CONFIGURATION
-      #
-      # Do NOT blindly overwrite the recovery fstab.
-      # ============================================================
-
-      - name: Collect stock FBE configuration
-        shell: bash
-        run: |
-          set -e
-
           ROOT="$PWD/work/rootfs"
+          DEST="$PWD/work/integration"
 
-          : > work/analysis/stock_fbe_fstab.txt
+          while IFS= read -r FILE; do
+            [ -f "$FILE" ] || continue
 
-          for F in \
-            "$ROOT/vendor/etc/fstab.mt6855" \
-            "$ROOT/vendor/etc/fstab.emmc"; do
+            REL="${FILE#"$ROOT"/}"
 
-            if [ -f "$F" ]; then
-              echo "===== ${F#$ROOT/} =====" \
-                | tee -a work/analysis/stock_fbe_fstab.txt
+            mkdir -p "$DEST/$(dirname "$REL")"
 
-              cat "$F" \
-                | tee -a work/analysis/stock_fbe_fstab.txt
+            cp -a \
+              "$FILE" \
+              "$DEST/$REL"
 
-              echo \
-                | tee -a work/analysis/stock_fbe_fstab.txt
+          done < work/analysis/resolved-modules.txt
+
+      # ============================================================
+      # 19. COPY ONLY EXACT INIT FILES
+      #
+      # An RC file must reference one of our selected services.
+      # ============================================================
+      - name: Resolve required init RC files
+        shell: bash
+        run: |
+          ROOT="$PWD/work/rootfs"
+          DEST="$PWD/work/integration"
+
+          find "$ROOT" -type f -name '*.rc' -print0 |
+          while IFS= read -r -d '' RC; do
+
+            if grep -qiE \
+              'android\.hardware\.security\.keymint@1\.0-service\.mitee|android\.hardware\.gatekeeper@1\.0-service\.mitee|tee-supplicant' \
+              "$RC"; then
+
+              REL="${RC#"$ROOT"/}"
+
+              mkdir -p "$DEST/$(dirname "$REL")"
+              cp -a "$RC" "$DEST/$REL"
+
+              echo "$REL" \
+                >> work/analysis/selected-init-files.txt
             fi
+          done
+
+      # ============================================================
+      # 20. REQUIRED VINTF DECLARATIONS
+      # ============================================================
+      - name: Resolve VINTF security declarations
+        shell: bash
+        run: |
+          ROOT="$PWD/work/rootfs"
+          DEST="$PWD/work/integration"
+
+          find "$ROOT" -type f \
+            \( -name '*.xml' -o -name '*manifest*' \) \
+            -print0 |
+          while IFS= read -r -d '' XML; do
+
+            if grep -qiE \
+              'android.hardware.security.keymint|android.hardware.gatekeeper|android.hardware.keymaster' \
+              "$XML"; then
+
+              REL="${XML#"$ROOT"/}"
+
+              mkdir -p "$DEST/$(dirname "$REL")"
+              cp -a "$XML" "$DEST/$REL"
+
+              echo "$REL" \
+                >> work/analysis/selected-vintf-files.txt
+            fi
+          done
+
+      # ============================================================
+      # 21. FIRMWARE / CONFIG DEPENDENCIES
+      # ============================================================
+      - name: Resolve Mitee and TEE firmware
+        shell: bash
+        run: |
+          ROOT="$PWD/work/rootfs"
+          DEST="$PWD/work/integration"
+
+          find "$ROOT" -type f \
+            \( \
+              -iname '*mitee*' \
+              -o -iname '*trustonic*' \
+              -o -iname '*keymint*' \
+              -o -iname '*keymaster*' \
+              -o -iname '*gatekeeper*' \
+            \) \
+            -path '*/firmware/*' \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            REL="${FILE#"$ROOT"/}"
+
+            mkdir -p "$DEST/$(dirname "$REL")"
+            cp -a "$FILE" "$DEST/$REL"
 
           done
 
-          echo
-          echo "=== STOCK FBE FSTAB ==="
-          cat work/analysis/stock_fbe_fstab.txt
-
-
       # ============================================================
-      # 22. COLLECT SELINUX REFERENCES
+      # 22. DISCOVER STOCK SELINUX REQUIREMENTS
       #
-      # SELinux policy is NOT blindly copied.
+      # This is INPUT for generated recovery policy.
+      # Stock policy itself is NOT dumped into device tree.
       # ============================================================
-
-      - name: Collect FBE SELinux references
+      - name: Analyze stock security SELinux references
         shell: bash
         run: |
-          set -e
-
           ROOT="$PWD/work/rootfs"
 
-          {
-            echo "=== FBE / KEYMINT / TEE SELINUX REFERENCES ==="
-            echo
-
-            for BASE in \
-              "$ROOT/vendor/etc/selinux" \
-              "$ROOT/system/etc/selinux"; do
-
-              [ -d "$BASE" ] || continue
-
-              find "$BASE" \
-                -type f \
-                2>/dev/null \
-                | sort \
-                | while read -r F; do
-
-                  if grep -aEqi \
-                    'keymint|keymaster|gatekeeper|tee|mitee|mobicore|trustonic|keystore|vold' \
-                    "$F" \
-                    2>/dev/null
-                  then
-                    echo
-                    echo "===== ${F#$ROOT/} ====="
-
-                    grep -aEi \
-                      'keymint|keymaster|gatekeeper|tee|mitee|mobicore|trustonic|keystore|vold' \
-                      "$F" \
-                      2>/dev/null \
-                      || true
-                  fi
-
-                done
-
-            done
-
-          } | tee work/analysis/fbe_selinux_references.txt
-
+          grep -RhiE \
+            'hal_keymint_default|hal_gatekeeper_default|hal_keymaster_default|mobicore|mobicore_user_device|teei_client_device|tkcore_admin_device|mitee_client_device|mitee_sfs_file|vendor_mtk_mitee_prop|ut_keymaster_device|key_install_data_file' \
+            "$ROOT/vendor/etc/selinux" \
+            "$ROOT/system/etc/selinux" \
+            "$ROOT/system_ext/etc/selinux" \
+            "$ROOT/product/etc/selinux" \
+            2>/dev/null \
+            > work/analysis/stock-security-sepolicy.txt || true
 
       # ============================================================
-      # 23. VERIFY RECOVERY ROOT
+      # 23. GENERATE RECOVERY SELINUX POLICY
+      #
+      # Minimal device-tree policy.
+      # We do not blindly copy full stock compiled CIL.
       # ============================================================
-
-      - name: Verify recovery root
+      - name: Generate recovery FBE SELinux policy
         shell: bash
         run: |
-          set -e
+          POLICY="work/integration/sepolicy"
 
-          DEST="$PWD/$RECOVERY_ROOT"
+          mkdir -p "$POLICY"
 
-          echo "Recovery root:"
-          echo "$DEST"
+          cat > "$POLICY/recovery_fbe.te" <<'EOF'
+          # Beryl recovery FBE security integration.
+          #
+          # Keep this policy scoped to recovery's FBE security chain.
 
-          if [ ! -d "$DEST" ]; then
-            echo
-            echo "ERROR: RECOVERY_ROOT does not exist."
-            echo
-            echo "Detected recovery/root directories:"
-            find . \
-              -type d \
-              -path '*/recovery/root' \
-              -print \
-              2>/dev/null \
-              | sort || true
+          type recovery_fbe_vendor_file, file_type, vendor_file_type;
 
+          # TEE character devices used by the vendor security stack.
+          type recovery_mitee_device, dev_type;
+          type recovery_mobicore_device, dev_type;
+          type recovery_teei_device, dev_type;
+          type recovery_tkcore_device, dev_type;
+
+          # Persistent Mitee security storage.
+          type recovery_mitee_sfs_file, file_type, data_file_type;
+
+          # Recovery needs to execute vendor security HAL components.
+          allow recovery recovery_fbe_vendor_file:dir {
+              open
+              read
+              search
+              getattr
+          };
+
+          allow recovery recovery_fbe_vendor_file:file {
+              open
+              read
+              getattr
+              map
+              execute
+              execute_no_trans
+          };
+
+          # Access required TEE devices.
+          allow recovery recovery_mitee_device:chr_file {
+              open
+              read
+              write
+              ioctl
+              getattr
+          };
+
+          allow recovery recovery_mobicore_device:chr_file {
+              open
+              read
+              write
+              ioctl
+              getattr
+          };
+
+          allow recovery recovery_teei_device:chr_file {
+              open
+              read
+              write
+              ioctl
+              getattr
+          };
+
+          allow recovery recovery_tkcore_device:chr_file {
+              open
+              read
+              write
+              ioctl
+              getattr
+          };
+
+          # Mitee secure storage access.
+          allow recovery recovery_mitee_sfs_file:dir {
+              create
+              open
+              read
+              write
+              search
+              getattr
+              add_name
+              remove_name
+          };
+
+          allow recovery recovery_mitee_sfs_file:file {
+              create
+              open
+              read
+              write
+              getattr
+              setattr
+              unlink
+              map
+          };
+          EOF
+
+          # --------------------------------------------------------
+          # File contexts
+          # --------------------------------------------------------
+
+          cat > "$POLICY/file_contexts" <<'EOF'
+          /vendor/bin/hw/android\.hardware\.security\.keymint@1\.0-service\.mitee    u:object_r:recovery_fbe_vendor_file:s0
+          /vendor/bin/hw/android\.hardware\.gatekeeper@1\.0-service\.mitee          u:object_r:recovery_fbe_vendor_file:s0
+          /vendor/bin/tee-supplicant                                                u:object_r:recovery_fbe_vendor_file:s0
+
+          /dev/mitee.*                                                              u:object_r:recovery_mitee_device:s0
+          /dev/mobicore                                                             u:object_r:recovery_mobicore_device:s0
+          /dev/teei.*                                                               u:object_r:recovery_teei_device:s0
+          /dev/tkcore.*                                                             u:object_r:recovery_tkcore_device:s0
+
+          /data/vendor/mitee(/.*)?                                                  u:object_r:recovery_mitee_sfs_file:s0
+          /metadata/vold(/.*)?                                                      u:object_r:vold_metadata_file:s0
+          EOF
+
+          # --------------------------------------------------------
+          # Never generate permissive rules.
+          # --------------------------------------------------------
+
+          if grep -RniE \
+            'permissive[[:space:]]+|setenforce[[:space:]]+0' \
+            "$POLICY"; then
+
+            echo "ERROR: permissive SELinux policy detected."
             exit 1
           fi
 
-
       # ============================================================
-      # 24. BACK UP EXISTING FILES THAT WILL BE REPLACED
+      # 24. DEVICE.MK FRAGMENT
+      #
+      # Product copy list is generated from ONLY resolved files.
       # ============================================================
-
-      - name: Backup existing recovery files
+      - name: Generate FBE product integration
         shell: bash
         run: |
-          set -e
+          OUT="work/integration/fbe-vendor-files.mk"
 
-          SRC="$PWD/work/recovery_integration"
-          DEST="$PWD/$RECOVERY_ROOT"
+          cat > "$OUT" <<'EOF'
+          # Auto-generated Beryl recovery FBE vendor integration.
+          # Only dependency-resolved security components are included.
 
-          rm -rf work/recovery_backups
-          mkdir -p work/recovery_backups
+          PRODUCT_COPY_FILES += \
+          EOF
 
-          while IFS= read -r -d '' F; do
-
-            REL="${F#$SRC/}"
-            TARGET="$DEST/$REL"
-
-            if [ -e "$TARGET" ]; then
-              BACKUP="work/recovery_backups/$REL"
-
-              mkdir -p "$(dirname "$BACKUP")"
-              cp -a "$TARGET" "$BACKUP"
-
-              echo "BACKUP: $REL"
-            fi
-
-          done < <(
-            find "$SRC" \
+          mapfile -t FILES < <(
+            find work/integration/vendor \
               -type f \
-              -print0
+              | sort
           )
 
+          TOTAL="${#FILES[@]}"
+          INDEX=0
+
+          for FILE in "${FILES[@]}"; do
+
+            INDEX=$((INDEX + 1))
+
+            SRC="${FILE#work/integration/}"
+            DEST="$SRC"
+
+            if [ "$INDEX" -eq "$TOTAL" ]; then
+              printf '    $(LOCAL_PATH)/%s:%s\n' \
+                "$SRC" "$DEST" >> "$OUT"
+            else
+              printf '    $(LOCAL_PATH)/%s:%s \\\n' \
+                "$SRC" "$DEST" >> "$OUT"
+            fi
+          done
 
       # ============================================================
-      # 25. COPY STOCK FBE COMPONENTS INTO RECOVERY TREE
-      #
-      # Existing files are preserved through the backup above.
+      # 25. GENERATE MODULE LIST
       # ============================================================
-
-      - name: Integrate stock FBE components
+      - name: Generate recovery module configuration
         shell: bash
         run: |
-          set -e
-
-          SRC="$PWD/work/recovery_integration"
-          DEST="$PWD/$RECOVERY_ROOT"
-
-          echo "Copying selected stock FBE components..."
-
-          cp -a "$SRC/." "$DEST/"
-
-          echo
-          echo "Integration completed."
-
-
-      # ============================================================
-      # 26. GENERATE INTEGRATION MANIFEST
-      # ============================================================
-
-      - name: Generate recovery integration manifest
-        shell: bash
-        run: |
-          set -e
+          mapfile -t MODULES < <(
+            find work/integration \
+              -type f \
+              -name '*.ko' \
+              -printf '%f\n' \
+              | sort -u
+          )
 
           {
-            echo "============================================================"
-            echo "BERYL ORANGEFOX STOCK FBE SECURITY INTEGRATION"
-            echo "============================================================"
             echo
+            echo "# Beryl FBE / TEE modules"
 
-            echo "ROM:"
-            echo "$ROM_VERSION"
-            echo "$ROM_FILENAME"
-            echo
+            if [ "${#MODULES[@]}" -gt 0 ]; then
 
-            echo "RECOVERY ROOT:"
-            echo "$RECOVERY_ROOT"
-            echo
+              printf 'TW_LOAD_VENDOR_MODULES := "'
 
-            echo "============================================================"
-            echo "EXPLICIT STOCK SECURITY COMPONENTS"
-            echo "============================================================"
+              FIRST=1
 
-            cat work/analysis/fbe_integration_manifest.txt \
-              2>/dev/null || true
+              for MOD in "${MODULES[@]}"; do
+                if [ "$FIRST" -eq 0 ]; then
+                  printf ' '
+                fi
 
-            echo
-            echo "============================================================"
-            echo "INIT FILES"
-            echo "============================================================"
+                printf '%s' "$MOD"
+                FIRST=0
+              done
 
-            cat work/analysis/fbe_init_manifest.txt \
-              2>/dev/null || true
+              printf '"\n'
 
-            echo
-            echo "============================================================"
-            echo "VINTF FILES"
-            echo "============================================================"
+              echo "TW_LOAD_VENDOR_BOOT_MODULES := true"
+            fi
 
-            cat work/analysis/fbe_vintf_manifest.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "ELF DEPENDENCIES"
-            echo "============================================================"
-
-            cat work/analysis/fbe_elf_dependency_manifest.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "STOCK FBE FSTAB"
-            echo "============================================================"
-
-            cat work/analysis/stock_fbe_fstab.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "SELINUX REFERENCES"
-            echo "============================================================"
-
-            cat work/analysis/fbe_selinux_references.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "MISSING FILES"
-            echo "============================================================"
-
-            cat work/logs/fbe_integration_missing.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "MISSING ELF DEPENDENCIES"
-            echo "============================================================"
-
-            cat work/logs/fbe_missing_elf_dependencies.txt \
-              2>/dev/null || true
-
-            echo
-            echo "============================================================"
-            echo "FINAL INTEGRATION TREE"
-            echo "============================================================"
-
-            find work/recovery_integration \
-              -type f \
-              -printf '%p %s bytes\n' \
-              | sort
-
-          } | tee work/analysis/RECOVERY_FBE_INTEGRATION_MANIFEST.txt
-
+          } > work/integration/fbe-modules.mk
 
       # ============================================================
-      # 27. VERIFY NO PARTITION IMAGES ENTERED RECOVERY INTEGRATION
+      # 26. SAFETY CHECK — NO REPORTS INTO TREE
       # ============================================================
-
-      - name: Verify integration tree
+      - name: Verify integration contents
         shell: bash
         run: |
-          set -e
+          echo "=== FILES THAT WILL ENTER TREE ==="
 
-          echo "Integration tree size:"
-          du -sh work/recovery_integration
-
-          echo
-          echo "Checking for unwanted partition/payload files..."
-
-          if find work/recovery_integration \
-              -type f \
-              \( \
-                -name '*.img' \
-                -o -name 'payload.bin' \
-                -o -name '*.zip' \
-              \) \
-              | grep -q .; then
-
-            echo "ERROR: ROM/payload image found in integration tree."
-            exit 1
-          fi
-
-          echo "Integration tree verification passed."
-
-
-      # ============================================================
-      # 28. SHOW GIT CHANGES
-      #
-      # No automatic git commit/push.
-      # ============================================================
-
-      - name: Show recovery tree changes
-        shell: bash
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "GIT STATUS"
-          echo "============================================================"
-
-          git status --short
-
-          echo
-          echo "============================================================"
-          echo "RECOVERY TREE"
-          echo "============================================================"
-
-          git status --short -- "$RECOVERY_ROOT" || true
-
-
-      # ============================================================
-      # 29. PACKAGE INTEGRATION REPORTS
-      #
-      # IMPORTANT:
-      # work/partitions is NOT included.
-      # ============================================================
-
-      - name: Package integration reports
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p work/package
-
-          cp -a work/analysis \
-            work/package/
-
-          cp -a work/logs \
-            work/package/
-
-          cp -a work/recovery_integration \
-            work/package/
-
-          echo "Package contents:"
-          find work/package \
+          find work/integration \
             -type f \
-            -printf '%p %s bytes\n' \
+            -printf '%P\n' \
             | sort
 
           echo
-          echo "Package size:"
-          du -sh work/package
+          echo "=== Checking for reports ==="
 
-          tar -czf \
-            work/beryl-stock-fbe-recovery-integration.tar.gz \
-            -C work/package \
-            analysis logs recovery_integration
+          if find work/integration \
+            -type f \
+            \( \
+              -name '*.txt' \
+              -o -name '*.sha256' \
+              -o -name '*.log' \
+            \) \
+            | grep -q .; then
+
+            echo "ERROR: analysis/report files entered integration."
+            exit 1
+          fi
+
+      # ============================================================
+      # 27. COPY ACTUAL INTEGRATION INTO TREE
+      # ============================================================
+      - name: Install FBE integration into device tree
+        shell: bash
+        run: |
+          set -e
+
+          # Vendor security files
+          if [ -d work/integration/vendor ]; then
+            mkdir -p recovery/root/vendor
+
+            rsync -a \
+              work/integration/vendor/ \
+              recovery/root/vendor/
+          fi
+
+          # Recovery SELinux
+          mkdir -p sepolicy/recovery
+
+          cp \
+            work/integration/sepolicy/recovery_fbe.te \
+            sepolicy/recovery/recovery_fbe.te
+
+          cp \
+            work/integration/sepolicy/file_contexts \
+            sepolicy/recovery/file_contexts
+
+          # Build fragments
+          cp \
+            work/integration/fbe-vendor-files.mk \
+            fbe-vendor-files.mk
+
+          cp \
+            work/integration/fbe-modules.mk \
+            fbe-modules.mk
+
+      # ============================================================
+      # 28. ENSURE BUILD FILES INCLUDE GENERATED FRAGMENTS
+      # ============================================================
+      - name: Integrate generated makefiles
+        shell: bash
+        run: |
+          DEVICE_MK="device.mk"
+          BOARD_CONFIG="BoardConfig.mk"
+
+          if [ -f "$DEVICE_MK" ]; then
+
+            if ! grep -q \
+              'fbe-vendor-files.mk' \
+              "$DEVICE_MK"; then
+
+              cat >> "$DEVICE_MK" <<'EOF'
+
+          # Beryl FBE decryption
+          include $(LOCAL_PATH)/fbe-vendor-files.mk
+          EOF
+            fi
+          fi
+
+          if [ -f "$BOARD_CONFIG" ]; then
+
+            if ! grep -q \
+              'sepolicy/recovery' \
+              "$BOARD_CONFIG"; then
+
+              cat >> "$BOARD_CONFIG" <<'EOF'
+
+          # Beryl recovery FBE SELinux
+          BOARD_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy/recovery
+          EOF
+            fi
+
+            if ! grep -q \
+              'fbe-modules.mk' \
+              "$BOARD_CONFIG"; then
+
+              cat >> "$BOARD_CONFIG" <<'EOF'
+
+          # Beryl FBE / TEE modules
+          include $(DEVICE_PATH)/fbe-modules.mk
+          EOF
+            fi
+          fi
+
+      # ============================================================
+      # 29. REMOVE OLD SKIP-DECRYPTION FLAG
+      # ============================================================
+      - name: Enable OrangeFox FBE support
+        shell: bash
+        run: |
+          grep -RIl \
+            'OF_SKIP_FBE_DECRYPTION' \
+            . \
+            --exclude-dir=.git \
+            --exclude-dir=work |
+          while IFS= read -r FILE; do
+
+            sed -i \
+              '/^[[:space:]]*OF_SKIP_FBE_DECRYPTION[[:space:]]*[:?+]*=/d' \
+              "$FILE"
+
+          done || true
+
+      # ============================================================
+      # 30. FINAL TREE CHECK
+      # ============================================================
+      - name: Validate final changes
+        shell: bash
+        run: |
+          echo "=== Git changes ==="
+          git status --short
 
           echo
-          echo "Final archive:"
-          ls -lh \
-            work/beryl-stock-fbe-recovery-integration.tar.gz
+          echo "=== No analysis files may be committed ==="
 
+          if git status --short |
+             grep -E \
+             'work/|\.txt$|\.sha256$'; then
+
+            echo "ERROR: analysis output is staged for tree."
+            exit 1
+          fi
+
+          echo
+          echo "=== No unrelated Mitee applications ==="
+
+          if find recovery/root/vendor \
+            -type f 2>/dev/null |
+            grep -Ei \
+            'mfidoca|mlipay|mtdservice|tidaservice|vsimapp|soterservice'; then
+
+            echo "ERROR: unrelated Mitee service was copied."
+            exit 1
+          fi
+
+          echo
+          echo "=== SELinux permissive check ==="
+
+          if grep -RniE \
+            'permissive[[:space:]]+|setenforce[[:space:]]+0' \
+            sepolicy/recovery; then
+
+            echo "ERROR: permissive policy detected."
+            exit 1
+          fi
 
       # ============================================================
-      # 30. UPLOAD SMALL INTEGRATION ARTIFACT
+      # 31. COMMIT ONLY DEVICE TREE CHANGES
       # ============================================================
+      - name: Commit FBE integration to main
+        shell: bash
+        run: |
+          set -e
 
-      - name: Upload FBE integration artifact
+          git config \
+            user.name \
+            "github-actions[bot]"
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Explicitly exclude work/
+          git add \
+            recovery \
+            sepolicy \
+            device.mk \
+            BoardConfig.mk \
+            fbe-vendor-files.mk \
+            fbe-modules.mk
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+
+          echo "=== COMMIT CONTENTS ==="
+          git diff --cached --name-status
+
+          git commit \
+            -m "beryl: integrate stock FBE decryption stack"
+
+          git push origin HEAD:main
+
+      # ============================================================
+      # 32. ANALYSIS ARTIFACT
+      #
+      # Reports are uploaded to Actions only.
+      # They NEVER enter the device tree.
+      # ============================================================
+      - name: Upload dependency analysis
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: beryl-stock-fbe-recovery-integration
+          name: beryl-fbe-dependency-analysis
           path: |
-            work/beryl-stock-fbe-recovery-integration.tar.gz
             work/analysis/
-            work/logs/
-            work/recovery_integration/
-          if-no-files-found: error
-          retention-days: 7
+          if-no-files-found: warn
+          retention-days: 14
