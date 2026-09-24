@@ -1582,18 +1582,17 @@ jobs:
 
             cat >> "$INIT" <<'EOF'
 
-# Stock FBE security stack support.
-# Only security services required by recovery are imported.
-on early-init
-    mkdir /vendor 0755 root root
-    mkdir /vendor/lib 0755 root root
-    mkdir /vendor/lib64 0755 root root
-    mkdir /vendor/bin 0755 root root
-    mkdir /vendor/bin/hw 0755 root root
-    mkdir /vendor/etc 0755 root root
-EOF
 
-          fi
+            on early-init
+            mkdir /vendor 0755 root root
+            mkdir /vendor/lib 0755 root root
+            mkdir /vendor/lib64 0755 root root
+            mkdir /vendor/bin 0755 root root
+            mkdir /vendor/bin/hw 0755 root root
+            mkdir /vendor/etc 0755 root root
+            EOF
+
+                 fi
 
 
       # ============================================================
