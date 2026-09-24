@@ -1,4 +1,4 @@
-name: Analyze Stock FBE KeyMint Dependencies
+name: Build Beryl OrangeFox with Stock FBE Security Stack
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
+  integrate:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -15,6 +15,9 @@ jobs:
       ROM_VERSION: OS1.0.4.0.UOQINXM
       ROM_FILENAME: miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
       ROM_URL: https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+
+      # Current expected OrangeFox ramdisk root.
+      RECOVERY_ROOT: recovery/root
 
     steps:
 
@@ -246,7 +249,7 @@ jobs:
       # 11. EXTRACT STOCK PARTITIONS
       #
       # IMPORTANT:
-      # Keep this payload logic unchanged.
+      # This payload logic is unchanged.
       # ============================================================
 
       - name: Extract stock partitions
@@ -374,612 +377,523 @@ jobs:
 
 
       # ============================================================
-      # 15. INVENTORY SECURITY FILES
+      # 15. CREATE FBE INTEGRATION STAGING TREE
       # ============================================================
 
-      - name: Analyze security files
+      - name: Create FBE integration staging tree
         shell: bash
         run: |
           set -e
 
-          ROOT="work/rootfs"
+          rm -rf work/recovery_integration
 
-          {
-            echo "=== FBE / KEYMINT / KEYMASTER / GATEKEEPER FILE INVENTORY ==="
-            echo
+          mkdir -p \
+            work/recovery_integration/vendor/bin \
+            work/recovery_integration/vendor/bin/hw \
+            work/recovery_integration/vendor/lib \
+            work/recovery_integration/vendor/lib64 \
+            work/recovery_integration/vendor/etc/init \
+            work/recovery_integration/vendor/etc/vintf/manifest \
+            work/recovery_integration/system/bin \
+            work/recovery_integration/system/lib \
+            work/recovery_integration/system/lib64 \
+            work/recovery_integration/system/etc/init \
+            work/recovery_integration/system/etc/vintf/manifest
 
-            for PART in vendor system system_ext product; do
-              DIR="$ROOT/$PART"
-
-              [ -d "$DIR" ] || continue
-
-              echo "===== $PART ====="
-
-              find "$DIR" -type f \
-                \( \
-                  -iname '*keymint*' \
-                  -o -iname '*keymaster*' \
-                  -o -iname '*gatekeeper*' \
-                  -o -iname '*vold*' \
-                  -o -iname '*cryptfs*' \
-                  -o -iname '*keystore*' \
-                  -o -iname '*tee*' \
-                  -o -iname '*trustonic*' \
-                  -o -iname '*mitee*' \
-                  -o -iname '*mobicore*' \
-                  -o -iname '*tz*' \
-                \) \
-                -print 2>/dev/null \
-                | sort || true
-
-              echo
-            done
-
-          } | tee work/analysis/security_file_inventory.txt
+          : > work/analysis/fbe_integration_manifest.txt
+          : > work/logs/fbe_integration_missing.txt
 
 
       # ============================================================
-      # 16. FSTAB / FBE CONFIGURATION
+      # 16. COLLECT STOCK FBE / KEYMINT / TEE COMPONENTS
       # ============================================================
 
-      - name: Analyze FBE configuration
+      - name: Collect stock FBE security components
         shell: bash
         run: |
           set -e
 
-          ROOT="work/rootfs"
+          ROOT="$PWD/work/rootfs"
+          STAGE="$PWD/work/recovery_integration"
 
-          {
-            echo "=== FBE / FSCRYPT CONFIGURATION ==="
-            echo
+          copy_if_exists() {
+            local REL="$1"
+            local SRC="$ROOT/$REL"
+            local DST="$STAGE/$REL"
 
-            echo "=== ALL FSTAB FILES ==="
+            if [ -f "$SRC" ]; then
+              mkdir -p "$(dirname "$DST")"
+              cp -a "$SRC" "$DST"
 
-            find "$ROOT" -type f \
-              \( \
-                -name 'fstab*' \
-                -o -name '*fstab*' \
-              \) \
-              -print 2>/dev/null \
+              echo "$REL -> $REL" \
+                | tee -a work/analysis/fbe_integration_manifest.txt
+            else
+              echo "MISSING: $REL" \
+                | tee -a work/logs/fbe_integration_missing.txt
+            fi
+          }
+
+          echo "=== STOCK FBE SECURITY COMPONENTS ===" \
+            | tee work/analysis/fbe_integration_manifest.txt
+
+          # TEE
+          copy_if_exists vendor/bin/tee-supplicant
+
+          # Mitee KeyMint / Gatekeeper services
+          copy_if_exists vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+          copy_if_exists vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
+
+          # KeyMint / Keymaster
+          copy_if_exists vendor/lib64/libkeymint.so
+          copy_if_exists vendor/lib64/libkeymint_support.so
+          copy_if_exists vendor/lib64/libkeymaster4support.so
+          copy_if_exists vendor/lib64/libkeymaster_messages.so
+          copy_if_exists vendor/lib64/lib_android_keymaster_keymint_utils.so
+
+          # Gatekeeper
+          copy_if_exists vendor/lib64/hw/gatekeeper.mitee.so
+
+          # Trustonic
+          copy_if_exists vendor/lib64/vendor.trustonic.tee@1.0.so
+          copy_if_exists vendor/lib64/vendor.trustonic.tee@1.1.so
+          copy_if_exists vendor/lib64/libteeservice_client.trustonic.so
+
+          # Mitee libraries identified in the stock analysis
+          copy_if_exists vendor/lib64/libteecli.so
+          copy_if_exists vendor/lib64/libmt_mitee.so
+          copy_if_exists vendor/lib64/libtida_mitee@1.2.so
+          copy_if_exists vendor/lib64/libmfido_mitee.so
+          copy_if_exists vendor/lib64/libmlipay_mitee.so
+
+          echo
+          echo "=== SELECTED COMPONENTS ==="
+          cat work/analysis/fbe_integration_manifest.txt
+
+          echo
+          echo "=== MISSING COMPONENTS ==="
+          cat work/logs/fbe_integration_missing.txt || true
+
+
+      # ============================================================
+      # 17. COLLECT SECURITY INIT FILES
+      # ============================================================
+
+      - name: Collect FBE security init files
+        shell: bash
+        run: |
+          set -e
+
+          ROOT="$PWD/work/rootfs"
+          STAGE="$PWD/work/recovery_integration"
+
+          : > work/analysis/fbe_init_manifest.txt
+
+          for BASE in \
+            "$ROOT/vendor/etc/init" \
+            "$ROOT/system/etc/init"; do
+
+            [ -d "$BASE" ] || continue
+
+            find "$BASE" -type f 2>/dev/null \
               | sort \
               | while read -r F; do
+
+                if grep -aEqi \
+                  'keymint|keymaster|gatekeeper|tee-supplicant|trustonic|mitee|mobicore|keystore2|vold' \
+                  "$F" 2>/dev/null
+                then
+                  REL="${F#$ROOT/}"
+                  DST="$STAGE/$REL"
+
+                  mkdir -p "$(dirname "$DST")"
+                  cp -a "$F" "$DST"
+
+                  echo "$REL -> $REL" \
+                    | tee -a work/analysis/fbe_init_manifest.txt
+                fi
+
+              done
+
+          done
+
+          echo
+          echo "=== INIT FILES ==="
+          cat work/analysis/fbe_init_manifest.txt || true
+
+
+      # ============================================================
+      # 18. COLLECT VINTF DECLARATIONS
+      # ============================================================
+
+      - name: Collect KeyMint Gatekeeper VINTF declarations
+        shell: bash
+        run: |
+          set -e
+
+          ROOT="$PWD/work/rootfs"
+          STAGE="$PWD/work/recovery_integration"
+
+          : > work/analysis/fbe_vintf_manifest.txt
+
+          for BASE in \
+            "$ROOT/vendor/etc/vintf" \
+            "$ROOT/system/etc/vintf"; do
+
+            [ -d "$BASE" ] || continue
+
+            find "$BASE" -type f 2>/dev/null \
+              | sort \
+              | while read -r F; do
+
+                if grep -aEqi \
+                  'keymint|keymaster|gatekeeper|tee|mitee' \
+                  "$F" 2>/dev/null
+                then
+                  REL="${F#$ROOT/}"
+                  DST="$STAGE/$REL"
+
+                  mkdir -p "$(dirname "$DST")"
+                  cp -a "$F" "$DST"
+
+                  echo "$REL -> $REL" \
+                    | tee -a work/analysis/fbe_vintf_manifest.txt
+                fi
+
+              done
+
+          done
+
+          echo
+          echo "=== VINTF FILES ==="
+          cat work/analysis/fbe_vintf_manifest.txt || true
+
+
+      # ============================================================
+      # 19. RESOLVE ELF DEPENDENCIES
+      # ============================================================
+
+      - name: Resolve FBE ELF dependencies
+        shell: bash
+        run: |
+          set -e
+
+          ROOT="$PWD/work/rootfs"
+          STAGE="$PWD/work/recovery_integration"
+
+          : > work/analysis/fbe_elf_dependency_manifest.txt
+          : > work/logs/fbe_missing_elf_dependencies.txt
+
+          find_library() {
+            local NAME="$1"
+
+            find \
+              "$ROOT/vendor/lib64" \
+              "$ROOT/vendor/lib" \
+              "$ROOT/system/lib64" \
+              "$ROOT/system/lib" \
+              "$ROOT/system_ext/lib64" \
+              "$ROOT/system_ext/lib" \
+              "$ROOT/product/lib64" \
+              "$ROOT/product/lib" \
+              -type f \
+              -name "$NAME" \
+              -print -quit \
+              2>/dev/null || true
+          }
+
+          declare -A SEEN
+
+          resolve_elf() {
+            local ELF="$1"
+
+            [ -f "$ELF" ] || return 0
+
+            [ "${SEEN[$ELF]+x}" = x ] && return 0
+            SEEN[$ELF]=1
+
+            if ! file "$ELF" 2>/dev/null | grep -qi ELF; then
+              return 0
+            fi
+
+            readelf -d "$ELF" 2>/dev/null \
+              | awk -F'[][]' '/NEEDED/ {print $2}' \
+              | sort -u \
+              | while read -r DEP; do
+
+                [ -n "$DEP" ] || continue
+
+                FOUND=$(find_library "$DEP")
+
+                if [ -z "$FOUND" ]; then
+                  echo "$DEP <- $ELF" \
+                    | tee -a work/logs/fbe_missing_elf_dependencies.txt
+                  continue
+                fi
+
+                REL="${FOUND#$ROOT/}"
+                DST="$STAGE/$REL"
+
+                mkdir -p "$(dirname "$DST")"
+
+                if [ ! -f "$DST" ]; then
+                  cp -a "$FOUND" "$DST"
+
+                  echo "$REL -> $REL (dependency)" \
+                    | tee -a work/analysis/fbe_elf_dependency_manifest.txt
+                fi
+
+                resolve_elf "$FOUND"
+
+              done
+          }
+
+          find "$STAGE" \
+            -type f \
+            \( -name '*.so' -o -name '*.so.*' \) \
+            -print \
+            | while read -r ELF; do
+                resolve_elf "$ELF"
+              done
+
+          echo
+          echo "=== RESOLVED DEPENDENCIES ==="
+          cat work/analysis/fbe_elf_dependency_manifest.txt || true
+
+          echo
+          echo "=== MISSING DEPENDENCIES ==="
+          cat work/logs/fbe_missing_elf_dependencies.txt || true
+
+
+      # ============================================================
+      # 20. VERIFY STAGED ELF FILES
+      # ============================================================
+
+      - name: Verify staged security binaries
+        shell: bash
+        run: |
+          set -e
+
+          {
+            echo "=== STAGED FBE SECURITY FILES ==="
+            echo
+
+            find work/recovery_integration \
+              -type f \
+              -printf '%p %s bytes\n' \
+              | sort
+
+            echo
+            echo "=== ELF FILES ==="
+
+            find work/recovery_integration \
+              -type f \
+              -print \
+              | while read -r F; do
+
+                if file "$F" 2>/dev/null | grep -qi ELF; then
                   echo
                   echo "===== $F ====="
-                  cat "$F" 2>/dev/null || true
-                done || true
 
-            echo
-            echo "=== FILEENCRYPTION REFERENCES ==="
+                  file "$F" || true
 
-            grep -RaiE \
-              'fileencryption|metadata_encryption|inlinecrypt|fscrypt|fsverity|keydirectory|wrappedkey' \
-              "$ROOT" \
-              2>/dev/null \
-              | head -1000 || true
+                  readelf -d "$F" 2>/dev/null \
+                    | grep -E 'NEEDED|RPATH|RUNPATH' \
+                    || true
+                fi
 
-          } | tee work/analysis/FBE_CONFIGURATION.txt
+              done
+
+          } | tee work/analysis/staged_security_verification.txt
 
 
       # ============================================================
-      # 17. VOLD ANALYSIS
-      # ============================================================
-
-      - name: Analyze vold dependencies
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-          OUT="work/analysis/vold_dependencies.txt"
-
-          {
-            echo "=== VOLD ANALYSIS ==="
-            echo
-
-            VOLD=$(find "$ROOT" -type f \
-              \( \
-                -path '*/system/bin/vold' \
-                -o -path '*/system/bin/vold.static' \
-                -o -name vold \
-              \) \
-              -print -quit 2>/dev/null || true)
-
-            if [ -z "$VOLD" ]; then
-              echo "vold not found."
-            else
-              echo "vold:"
-              echo "$VOLD"
-              echo
-
-              echo "=== FILE ==="
-              file "$VOLD" || true
-
-              echo
-              echo "=== READ ELF DEPENDENCIES ==="
-
-              readelf -d "$VOLD" 2>/dev/null \
-                | grep -E 'NEEDED|RPATH|RUNPATH' \
-                || true
-
-              echo
-              echo "=== STRINGS: FBE / KEYMINT / FSCRYPT ==="
-
-              strings "$VOLD" 2>/dev/null \
-                | grep -Ei \
-                  'keymint|keymaster|keystore|fscrypt|f2fs|crypt|metadata|inlinecrypt|wrappedkey|gatekeeper' \
-                | sort -u \
-                || true
-            fi
-
-          } | tee "$OUT"
-
-
-      # ============================================================
-      # 18. KEYMINT / KEYMASTER SERVICES
-      # ============================================================
-
-      - name: Analyze KeyMint services
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-
-          {
-            echo "=== KEYMINT / KEYMASTER / GATEKEEPER SERVICES ==="
-            echo
-
-            find "$ROOT" -type f \
-              \( \
-                -iname '*keymint*' \
-                -o -iname '*keymaster*' \
-                -o -iname '*gatekeeper*' \
-              \) \
-              -print 2>/dev/null \
-              | sort || true
-
-            echo
-            echo "=== INIT RC REFERENCES ==="
-
-            grep -RaiE \
-              'keymint|keymaster|gatekeeper|tee-supplicant|trustonic|mitee|mobicore' \
-              "$ROOT/vendor/etc/init" \
-              "$ROOT/system/etc/init" \
-              2>/dev/null \
-              | head -2000 \
-              || true
-
-            echo
-            echo "=== VINTF REFERENCES ==="
-
-            grep -RaiE \
-              'keymint|keymaster|gatekeeper' \
-              "$ROOT/vendor/etc/vintf" \
-              "$ROOT/system/etc/vintf" \
-              2>/dev/null \
-              | head -2000 \
-              || true
-
-          } | tee work/analysis/keymint_services.txt
-
-
-      # ============================================================
-      # 19. KEYMINT ELF DEPENDENCIES
-      # ============================================================
-
-      - name: Analyze KeyMint ELF dependencies
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-
-          {
-            echo "=== KEYMINT ELF DEPENDENCIES ==="
-            echo
-
-            find "$ROOT" -type f \
-              \( \
-                -name '*keymint*' \
-                -o -name '*keymaster*' \
-                -o -name '*gatekeeper*' \
-              \) \
-              -print 2>/dev/null \
-              | sort \
-              | while read -r F; do
-
-                  echo
-                  echo "========================================"
-                  echo "$F"
-                  echo "========================================"
-
-                  file "$F" 2>/dev/null || true
-
-                  if file "$F" 2>/dev/null | grep -qi 'ELF'; then
-                    echo
-                    echo "--- NEEDED ---"
-
-                    readelf -d "$F" 2>/dev/null \
-                      | grep 'NEEDED' \
-                      || true
-
-                    echo
-                    echo "--- RPATH/RUNPATH ---"
-
-                    readelf -d "$F" 2>/dev/null \
-                      | grep -E 'RPATH|RUNPATH' \
-                      || true
-                  fi
-
-                done || true
-
-          } | tee work/analysis/keymint_elf_dependencies.txt
-
-
-      # ============================================================
-      # 20. SECURITY LIBRARIES
-      # ============================================================
-
-      - name: Analyze security libraries
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-
-          {
-            echo "=== SECURITY LIBRARIES ==="
-            echo
-
-            find "$ROOT" -type f \
-              \( \
-                -name '*keymint*.so*' \
-                -o -name '*keymaster*.so*' \
-                -o -name '*gatekeeper*.so*' \
-                -o -name '*trustonic*.so*' \
-                -o -name '*mitee*.so*' \
-                -o -name '*mobicore*.so*' \
-                -o -name '*tee*.so*' \
-              \) \
-              -print 2>/dev/null \
-              | sort || true
-
-          } | tee work/analysis/security_libraries.txt
-
-
-      # ============================================================
-      # 21. TEE DEVICE REQUIREMENTS
+      # 21. COLLECT STOCK FBE CONFIGURATION
       #
-      # IMPORTANT FIX:
-      # grep returning 1 for "no matches" is allowed.
+      # Do NOT blindly overwrite the recovery fstab.
       # ============================================================
 
-      - name: Analyze TEE device requirements
+      - name: Collect stock FBE configuration
         shell: bash
         run: |
           set -e
 
-          OUT="work/analysis/tee_device_requirements.txt"
-          ROOT="work/rootfs"
+          ROOT="$PWD/work/rootfs"
 
-          {
-            echo "=== TEE / KEYMINT DEVICE REQUIREMENTS ==="
-            echo
+          : > work/analysis/stock_fbe_fstab.txt
 
-            echo "=== Matching strings in vendor/system files ==="
+          for F in \
+            "$ROOT/vendor/etc/fstab.mt6855" \
+            "$ROOT/vendor/etc/fstab.emmc"; do
 
-            find "$ROOT/vendor" "$ROOT/odm" "$ROOT/system" \
-              -type f \
-              2>/dev/null \
-              | while read -r F; do
-                  if grep -aEi \
-                    'tee|mobicore|mitee|trustonic|keymaster|keymint|gatekeeper|tz|secure' \
-                    "$F" \
-                    2>/dev/null
-                  then
-                    echo
-                    echo "FILE: $F"
-                  fi
-                done || true
+            if [ -f "$F" ]; then
+              echo "===== ${F#$ROOT/} =====" \
+                | tee -a work/analysis/stock_fbe_fstab.txt
 
-            echo
-            echo "=== Vendor file-context references ==="
+              cat "$F" \
+                | tee -a work/analysis/stock_fbe_fstab.txt
 
-            if [ -f "$ROOT/vendor/etc/selinux/vendor_file_contexts" ]; then
-              grep -aEi \
-                'tee|mobicore|mitee|trustonic|keymaster|keymint|gatekeeper|tz' \
-                "$ROOT/vendor/etc/selinux/vendor_file_contexts" \
-                2>/dev/null \
-                || true
+              echo \
+                | tee -a work/analysis/stock_fbe_fstab.txt
             fi
 
-            echo
-            echo "=== Vendor SELinux policy references ==="
+          done
 
-            if [ -d "$ROOT/vendor/etc/selinux" ]; then
-              find "$ROOT/vendor/etc/selinux" \
-                -type f \
-                2>/dev/null \
-                | while read -r F; do
-
-                    if grep -aEi \
-                      'tee|mobicore|mitee|trustonic|keymaster|keymint|gatekeeper|tz' \
-                      "$F" \
-                      2>/dev/null
-                    then
-                      echo
-                      echo "POLICY FILE: $F"
-                    fi
-
-                  done || true
-            fi
-
-            echo
-            echo "=== Explicit device-node references ==="
-
-            grep -RaiE \
-              '/dev/(tee|mobicore|mitee|trustonic|tz|tbase|keymaster|keymint|gatekeeper)' \
-              "$ROOT" \
-              2>/dev/null \
-              | head -2000 \
-              || true
-
-          } > "$OUT"
-
-          cat "$OUT"
+          echo
+          echo "=== STOCK FBE FSTAB ==="
+          cat work/analysis/stock_fbe_fstab.txt
 
 
       # ============================================================
-      # 22. SELINUX RULE ANALYSIS
+      # 22. COLLECT SELINUX REFERENCES
+      #
+      # SELinux policy is NOT blindly copied.
       # ============================================================
 
-      - name: Analyze security SELinux rules
+      - name: Collect FBE SELinux references
         shell: bash
         run: |
           set -e
 
-          ROOT="work/rootfs"
-          OUT="work/analysis/security_selinux_rules.txt"
+          ROOT="$PWD/work/rootfs"
 
           {
-            echo "=== SECURITY SELINUX REFERENCES ==="
+            echo "=== FBE / KEYMINT / TEE SELINUX REFERENCES ==="
             echo
 
-            if [ -d "$ROOT/vendor/etc/selinux" ]; then
+            for BASE in \
+              "$ROOT/vendor/etc/selinux" \
+              "$ROOT/system/etc/selinux"; do
 
-              find "$ROOT/vendor/etc/selinux" \
+              [ -d "$BASE" ] || continue
+
+              find "$BASE" \
                 -type f \
                 2>/dev/null \
                 | sort \
                 | while read -r F; do
 
-                    if grep -aEi \
-                      'keymint|keymaster|gatekeeper|tee|mitee|mobicore|trustonic|sfs|keystore' \
-                      "$F" \
-                      2>/dev/null
-                    then
-                      echo
-                      echo "FILE: $F"
-                    fi
-
-                  done || true
-
-            fi
-
-            echo
-            echo "=== GLOBAL SECURITY REFERENCES ==="
-
-            grep -RaiE \
-              'hal_keymint|hal_keymaster|hal_gatekeeper|key_install_data_file|mitee_client_device|mobicore_user_device|teei_client_device|tkcore_admin_device|mobicore' \
-              "$ROOT/vendor/etc/selinux" \
-              "$ROOT/system/etc/selinux" \
-              2>/dev/null \
-              | head -5000 \
-              || true
-
-          } | tee "$OUT"
-
-
-      # ============================================================
-      # 23. KEY STORAGE PATHS
-      # ============================================================
-
-      - name: Analyze key storage paths
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-
-          {
-            echo "=== KEY STORAGE / METADATA PATHS ==="
-            echo
-
-            echo "=== REFERENCES TO METADATA / KEY DIRECTORIES ==="
-
-            grep -RaiE \
-              'metadata_encryption|keydirectory|/metadata|/data/misc/keystore|/data/misc/vold|keydata|key_install' \
-              "$ROOT" \
-              2>/dev/null \
-              | head -3000 \
-              || true
-
-            echo
-            echo "=== POSSIBLE KEY STORAGE DIRECTORIES ==="
-
-            find "$ROOT" \
-              -type d \
-              \( \
-                -iname '*key*' \
-                -o -iname '*keystore*' \
-                -o -iname '*vold*' \
-                -o -iname '*metadata*' \
-              \) \
-              2>/dev/null \
-              | sort \
-              | head -2000 \
-              || true
-
-          } | tee work/analysis/key_storage_paths.txt
-
-
-      # ============================================================
-      # 24. KERNEL FBE SUPPORT
-      # ============================================================
-
-      - name: Analyze kernel FBE support
-        shell: bash
-        run: |
-          set -e
-
-          {
-            echo "=== KERNEL / MODULE FBE SUPPORT ==="
-            echo
-
-            echo "=== EXTRACTED VENDOR MODULES ==="
-
-            find work/rootfs/vendor_dlkm \
-              work/rootfs/odm_dlkm \
-              -type f \
-              -name '*.ko' \
-              -print \
-              2>/dev/null \
-              | sort \
-              || true
-
-            echo
-            echo "=== FBE / FSCRYPT STRINGS IN MODULES ==="
-
-            find work/rootfs/vendor_dlkm \
-              work/rootfs/odm_dlkm \
-              -type f \
-              -name '*.ko' \
-              -print \
-              2>/dev/null \
-              | while read -r F; do
-
-                  strings "$F" 2>/dev/null \
-                    | grep -Ei \
-                      'fscrypt|f2fs|inlinecrypt|blk-crypto|crypto' \
-                    | while read -r LINE; do
-                      echo "$F: $LINE"
-                    done || true
-
-                done || true
-
-          } | tee work/analysis/kernel_fbe_support.txt
-
-
-      # ============================================================
-      # 25. INIT / BOOT CONFIGURATION
-      # ============================================================
-
-      - name: Analyze init and boot configuration
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="work/rootfs"
-
-          {
-            echo "=== INIT / BOOT SECURITY CONFIGURATION ==="
-            echo
-
-            echo "=== INIT RC FILES ==="
-
-            find "$ROOT/vendor/etc/init" \
-              "$ROOT/system/etc/init" \
-              -type f \
-              2>/dev/null \
-              | sort \
-              | while read -r F; do
-
-                  if grep -aEi \
-                    'keymint|keymaster|gatekeeper|vold|tee|trustonic|mitee|mobicore|keystore' \
+                  if grep -aEqi \
+                    'keymint|keymaster|gatekeeper|tee|mitee|mobicore|trustonic|keystore|vold' \
                     "$F" \
                     2>/dev/null
                   then
                     echo
-                    echo "FILE: $F"
+                    echo "===== ${F#$ROOT/} ====="
+
+                    grep -aEi \
+                      'keymint|keymaster|gatekeeper|tee|mitee|mobicore|trustonic|keystore|vold' \
+                      "$F" \
+                      2>/dev/null \
+                      || true
                   fi
 
-                done || true
+                done
 
-            echo
-            echo "=== SECURITY PROPERTIES ==="
+            done
 
-            grep -RaiE \
-              'keymint|keymaster|gatekeeper|vold|keystore|tee|trustonic|mitee|mobicore' \
-              "$ROOT/vendor/etc" \
-              "$ROOT/system/etc" \
-              2>/dev/null \
-              | head -3000 \
-              || true
-
-          } | tee work/analysis/init_boot_configuration.txt
+          } | tee work/analysis/fbe_selinux_references.txt
 
 
       # ============================================================
-      # 26. COMPLETE SECURITY FILE INVENTORY
+      # 23. VERIFY RECOVERY ROOT
       # ============================================================
 
-      - name: Generate complete security inventory
+      - name: Verify recovery root
         shell: bash
         run: |
           set -e
 
-          {
-            echo "=== COMPLETE SECURITY-RELATED FILE INVENTORY ==="
-            echo
+          DEST="$PWD/$RECOVERY_ROOT"
 
-            find work/rootfs \
+          echo "Recovery root:"
+          echo "$DEST"
+
+          if [ ! -d "$DEST" ]; then
+            echo
+            echo "ERROR: RECOVERY_ROOT does not exist."
+            echo
+            echo "Detected recovery/root directories:"
+            find . \
+              -type d \
+              -path '*/recovery/root' \
+              -print \
+              2>/dev/null \
+              | sort || true
+
+            exit 1
+          fi
+
+
+      # ============================================================
+      # 24. BACK UP EXISTING FILES THAT WILL BE REPLACED
+      # ============================================================
+
+      - name: Backup existing recovery files
+        shell: bash
+        run: |
+          set -e
+
+          SRC="$PWD/work/recovery_integration"
+          DEST="$PWD/$RECOVERY_ROOT"
+
+          rm -rf work/recovery_backups
+          mkdir -p work/recovery_backups
+
+          while IFS= read -r -d '' F; do
+
+            REL="${F#$SRC/}"
+            TARGET="$DEST/$REL"
+
+            if [ -e "$TARGET" ]; then
+              BACKUP="work/recovery_backups/$REL"
+
+              mkdir -p "$(dirname "$BACKUP")"
+              cp -a "$TARGET" "$BACKUP"
+
+              echo "BACKUP: $REL"
+            fi
+
+          done < <(
+            find "$SRC" \
               -type f \
-              2>/dev/null \
-              | grep -Ei \
-                'keymint|keymaster|gatekeeper|keystore|vold|fscrypt|cryptfs|tee|mitee|mobicore|trustonic|tz|sfs' \
-              | sort \
-              || true
-
-          } | tee work/analysis/file_inventory.txt
+              -print0
+          )
 
 
       # ============================================================
-      # 27. PARTITION INVENTORY
+      # 25. COPY STOCK FBE COMPONENTS INTO RECOVERY TREE
+      #
+      # Existing files are preserved through the backup above.
       # ============================================================
 
-      - name: Generate partition inventory
+      - name: Integrate stock FBE components
         shell: bash
         run: |
           set -e
 
-          {
-            echo "=== EXTRACTED PARTITION INVENTORY ==="
-            echo
+          SRC="$PWD/work/recovery_integration"
+          DEST="$PWD/$RECOVERY_ROOT"
 
-            find work/partitions \
-              -maxdepth 1 \
-              -type f \
-              -printf '%f\t%s bytes\n' \
-              2>/dev/null \
-              | sort
+          echo "Copying selected stock FBE components..."
 
-          } | tee work/analysis/partition_inventory.txt
+          cp -a "$SRC/." "$DEST/"
+
+          echo
+          echo "Integration completed."
 
 
       # ============================================================
-      # 28. GENERATE DEPENDENCY SUMMARY
+      # 26. GENERATE INTEGRATION MANIFEST
       # ============================================================
 
-      - name: Generate dependency summary
+      - name: Generate recovery integration manifest
         shell: bash
         run: |
           set -e
-
-          OUT="work/analysis/FBE_KEYMINT_SUMMARY.txt"
 
           {
             echo "============================================================"
-            echo "BERYL STOCK FBE / KEYMINT DEPENDENCY ANALYSIS"
+            echo "BERYL ORANGEFOX STOCK FBE SECURITY INTEGRATION"
             echo "============================================================"
             echo
 
@@ -988,105 +902,150 @@ jobs:
             echo "$ROM_FILENAME"
             echo
 
-            echo "============================================================"
-            echo "FBE CONFIGURATION"
-            echo "============================================================"
+            echo "RECOVERY ROOT:"
+            echo "$RECOVERY_ROOT"
             echo
 
-            if [ -f work/analysis/FBE_CONFIGURATION.txt ]; then
-              cat work/analysis/FBE_CONFIGURATION.txt
-            fi
-
-            echo
             echo "============================================================"
-            echo "VOLD"
+            echo "EXPLICIT STOCK SECURITY COMPONENTS"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/vold_dependencies.txt ]; then
-              cat work/analysis/vold_dependencies.txt
-            fi
+            cat work/analysis/fbe_integration_manifest.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "KEYMINT SERVICES"
+            echo "INIT FILES"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/keymint_services.txt ]; then
-              cat work/analysis/keymint_services.txt
-            fi
+            cat work/analysis/fbe_init_manifest.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "KEYMINT ELF DEPENDENCIES"
+            echo "VINTF FILES"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/keymint_elf_dependencies.txt ]; then
-              cat work/analysis/keymint_elf_dependencies.txt
-            fi
+            cat work/analysis/fbe_vintf_manifest.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "TEE DEVICE REQUIREMENTS"
+            echo "ELF DEPENDENCIES"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/tee_device_requirements.txt ]; then
-              cat work/analysis/tee_device_requirements.txt
-            fi
+            cat work/analysis/fbe_elf_dependency_manifest.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "SELINUX"
+            echo "STOCK FBE FSTAB"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/security_selinux_rules.txt ]; then
-              cat work/analysis/security_selinux_rules.txt
-            fi
+            cat work/analysis/stock_fbe_fstab.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "KEY STORAGE"
+            echo "SELINUX REFERENCES"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/key_storage_paths.txt ]; then
-              cat work/analysis/key_storage_paths.txt
-            fi
+            cat work/analysis/fbe_selinux_references.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "KERNEL FBE SUPPORT"
+            echo "MISSING FILES"
             echo "============================================================"
-            echo
 
-            if [ -f work/analysis/kernel_fbe_support.txt ]; then
-              cat work/analysis/kernel_fbe_support.txt
-            fi
+            cat work/logs/fbe_integration_missing.txt \
+              2>/dev/null || true
 
             echo
             echo "============================================================"
-            echo "INIT / BOOT"
+            echo "MISSING ELF DEPENDENCIES"
             echo "============================================================"
+
+            cat work/logs/fbe_missing_elf_dependencies.txt \
+              2>/dev/null || true
+
             echo
+            echo "============================================================"
+            echo "FINAL INTEGRATION TREE"
+            echo "============================================================"
 
-            if [ -f work/analysis/init_boot_configuration.txt ]; then
-              cat work/analysis/init_boot_configuration.txt
-            fi
+            find work/recovery_integration \
+              -type f \
+              -printf '%p %s bytes\n' \
+              | sort
 
-          } > "$OUT"
-
-          cat "$OUT"
+          } | tee work/analysis/RECOVERY_FBE_INTEGRATION_MANIFEST.txt
 
 
-    # ============================================================
-    # 29. PACKAGE ONLY ANALYSIS REPORTS
-    # ============================================================
+      # ============================================================
+      # 27. VERIFY NO PARTITION IMAGES ENTERED RECOVERY INTEGRATION
+      # ============================================================
 
-      - name: Package analysis reports
+      - name: Verify integration tree
+        shell: bash
+        run: |
+          set -e
+
+          echo "Integration tree size:"
+          du -sh work/recovery_integration
+
+          echo
+          echo "Checking for unwanted partition/payload files..."
+
+          if find work/recovery_integration \
+              -type f \
+              \( \
+                -name '*.img' \
+                -o -name 'payload.bin' \
+                -o -name '*.zip' \
+              \) \
+              | grep -q .; then
+
+            echo "ERROR: ROM/payload image found in integration tree."
+            exit 1
+          fi
+
+          echo "Integration tree verification passed."
+
+
+      # ============================================================
+      # 28. SHOW GIT CHANGES
+      #
+      # No automatic git commit/push.
+      # ============================================================
+
+      - name: Show recovery tree changes
+        shell: bash
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "GIT STATUS"
+          echo "============================================================"
+
+          git status --short
+
+          echo
+          echo "============================================================"
+          echo "RECOVERY TREE"
+          echo "============================================================"
+
+          git status --short -- "$RECOVERY_ROOT" || true
+
+
+      # ============================================================
+      # 29. PACKAGE INTEGRATION REPORTS
+      #
+      # IMPORTANT:
+      # work/partitions is NOT included.
+      # ============================================================
+
+      - name: Package integration reports
         shell: bash
         run: |
           set -e
@@ -1099,7 +1058,10 @@ jobs:
           cp -a work/logs \
             work/package/
 
-          echo "Analysis package contents:"
+          cp -a work/recovery_integration \
+            work/package/
+
+          echo "Package contents:"
           find work/package \
             -type f \
             -printf '%p %s bytes\n' \
@@ -1110,26 +1072,28 @@ jobs:
           du -sh work/package
 
           tar -czf \
-            work/beryl-stock-fbe-keymint-analysis.tar.gz \
+            work/beryl-stock-fbe-recovery-integration.tar.gz \
             -C work/package \
-            analysis logs
+            analysis logs recovery_integration
 
           echo
-          echo "Final report archive:"
-          ls -lh work/beryl-stock-fbe-keymint-analysis.tar.gz
+          echo "Final archive:"
+          ls -lh \
+            work/beryl-stock-fbe-recovery-integration.tar.gz
 
 
       # ============================================================
-      # 30. UPLOAD ONLY SMALL ANALYSIS ARTIFACT
+      # 30. UPLOAD SMALL INTEGRATION ARTIFACT
       # ============================================================
 
-      - name: Upload analysis artifact
+      - name: Upload FBE integration artifact
         uses: actions/upload-artifact@v4
         with:
-          name: beryl-stock-fbe-keymint-analysis
+          name: beryl-stock-fbe-recovery-integration
           path: |
-            work/beryl-stock-fbe-keymint-analysis.tar.gz
+            work/beryl-stock-fbe-recovery-integration.tar.gz
             work/analysis/
             work/logs/
+            work/recovery_integration/
           if-no-files-found: error
           retention-days: 7
