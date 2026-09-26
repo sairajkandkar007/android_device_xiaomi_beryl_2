@@ -1,0 +1,1344 @@
+name: Beryl FBE Decryption Integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-fbe:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. CHECKOUT MAIN
+      # ============================================================
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # ============================================================
+      # 2. INSTALL TOOLS
+      # ============================================================
+      - name: Install tools
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            cpio \
+            liblzma-dev \
+            wget \
+            aria2 \
+            unzip \
+            e2fsprogs \
+            erofs-utils \
+            file \
+            binutils \
+            python3-pip \
+            python3-venv \
+            git
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install android-payload-dumper==2.3.0
+
+          payload-dumper --version
+
+      # ============================================================
+      # 3. CREATE WORKSPACE
+      # ============================================================
+      - name: Create workspace
+        run: |
+          set -euo pipefail
+
+          rm -rf work
+
+          mkdir -p \
+            work/rom \
+            work/payload \
+            work/images \
+            work/images/extracted \
+            work/rootfs \
+            work/rootfs/stock_security \
+            work/unpacked \
+            work/security
+
+      # ============================================================
+      # 4. STOCK ROM VARIABLES
+      # ============================================================
+      - name: Set ROM variables
+        run: |
+          cat > "$GITHUB_ENV" <<'EOF'
+          ROM_VERSION=OS1.0.4.0.UOQINXM
+          ROM_FILENAME=miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+          ROM_URL=https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+          EOF
+
+      # ============================================================
+      # 5. CDN BENCHMARK
+      # ============================================================
+      - name: CDN benchmark
+        run: |
+          set -euo pipefail
+
+          curl \
+            -L \
+            --range 0-1048575 \
+            --silent \
+            --show-error \
+            --output /dev/null \
+            "$ROM_URL" || true
+
+      # ============================================================
+      # 6. DOWNLOAD STOCK ROM
+      # ============================================================
+      - name: Download stock ROM
+        run: |
+          set -euo pipefail
+
+          aria2c \
+            --console-log-level=warn \
+            --file-allocation=none \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=10M \
+            --dir=work/rom \
+            --out="$ROM_FILENAME" \
+            "$ROM_URL"
+
+      # ============================================================
+      # 7. VERIFY ROM
+      # ============================================================
+      - name: Verify ROM
+        run: |
+          set -euo pipefail
+
+          test -f "work/rom/$ROM_FILENAME"
+          test -s "work/rom/$ROM_FILENAME"
+
+          unzip -t \
+            "work/rom/$ROM_FILENAME" \
+            >/dev/null
+
+          echo "ROM verified:"
+          ls -lh "work/rom/$ROM_FILENAME"
+
+      # ============================================================
+      # 8. EXTRACT COMPLETE ROM ZIP
+      # ============================================================
+      - name: Extract complete ROM ZIP
+        run: |
+          set -euo pipefail
+
+          rm -rf work/rom_extracted
+          mkdir -p work/rom_extracted
+
+          unzip -q \
+            "work/rom/$ROM_FILENAME" \
+            -d work/rom_extracted
+
+          find work/rom_extracted \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            | sort \
+            > work/rom_file_list.txt
+
+          echo "ROM contents:"
+          cat work/rom_file_list.txt
+
+      # ============================================================
+      # 9. FIND PAYLOAD
+      # ============================================================
+      - name: Find payload
+        run: |
+          set -euo pipefail
+
+          PAYLOAD_PATH="$(
+            find work/rom_extracted \
+              -type f \
+              -name payload.bin \
+              | head -n 1
+          )"
+
+          if [ -z "$PAYLOAD_PATH" ]; then
+            echo "payload.bin not found"
+            exit 1
+          fi
+
+          cp \
+            "$PAYLOAD_PATH" \
+            work/payload/payload.bin
+
+          echo "PAYLOAD_PATH=work/payload/payload.bin" >> "$GITHUB_ENV"
+
+          ls -lh work/payload/payload.bin
+
+      # ============================================================
+      # 10. LIST PAYLOAD
+      # ============================================================
+      - name: List payload
+        run: |
+          set -euo pipefail
+
+          payload-dumper \
+            "$PAYLOAD_PATH" \
+            --list
+
+      # ============================================================
+      # 11. EXTRACT EXACT STOCK PARTITIONS
+      #
+      # DO NOT add init_boot.
+      # DO NOT add a separate odm partition.
+      # ============================================================
+      - name: Extract exact stock partitions
+        run: |
+          set -euo pipefail
+
+          payload-dumper \
+            "$PAYLOAD_PATH" \
+            -o work/images/extracted \
+            -p \
+              vendor \
+              vendor_dlkm \
+              odm_dlkm \
+              system \
+              system_ext \
+              product \
+              boot \
+              dtbo \
+              vendor_boot \
+              vbmeta \
+              vbmeta_system \
+              vbmeta_vendor
+
+          echo "Extracted partitions:"
+
+          find work/images/extracted \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+      # ============================================================
+      # 12. VERIFY EXTRACTED PARTITIONS
+      # ============================================================
+      - name: Verify extracted partitions
+        run: |
+          set -euo pipefail
+
+          required_partitions=(
+            vendor
+            vendor_dlkm
+            odm_dlkm
+            system
+            system_ext
+            product
+            boot
+            dtbo
+            vendor_boot
+            vbmeta
+            vbmeta_system
+            vbmeta_vendor
+          )
+
+          for partition in "${required_partitions[@]}"; do
+            image="work/images/extracted/$partition.img"
+
+            if [ ! -f "$image" ]; then
+              echo "Missing partition: $image"
+              exit 1
+            fi
+
+            if [ ! -s "$image" ]; then
+              echo "Empty partition: $image"
+              exit 1
+            fi
+          done
+
+          echo "All required partitions extracted successfully."
+
+      # ============================================================
+      # 13. IDENTIFY PARTITION FILESYSTEMS
+      # ============================================================
+      - name: Identify partition filesystems
+        run: |
+          set -euo pipefail
+
+          for image in work/images/extracted/*.img; do
+            echo
+            echo "============================================================"
+            echo "$image"
+            echo "============================================================"
+
+            file "$image" || true
+          done
+
+      # ============================================================
+      # 14. EXTRACT EROFS PARTITIONS
+      # ============================================================
+      - name: Extract EROFS partitions
+        run: |
+          set -euo pipefail
+
+          extract_erofs() {
+            local name="$1"
+            local image="work/images/extracted/$name.img"
+            local output="work/rootfs/$name"
+
+            if [ ! -f "$image" ]; then
+              return 0
+            fi
+
+            rm -rf "$output"
+            mkdir -p "$output"
+
+            if file "$image" | grep -qi "EROFS"; then
+              echo "Extracting EROFS: $name"
+
+              fsck.erofs \
+                --extract="$output" \
+                "$image"
+            else
+              echo "$name is not EROFS; skipping."
+            fi
+          }
+
+          extract_erofs vendor
+          extract_erofs vendor_dlkm
+          extract_erofs odm_dlkm
+          extract_erofs system
+          extract_erofs system_ext
+          extract_erofs product
+
+      # ============================================================
+      # 15. INSTALL AOSP UNPACK_BOOTIMG
+      # ============================================================
+      - name: Install AOSP unpack_bootimg.py
+        run: |
+          set -euo pipefail
+
+          git clone \
+            --depth=1 \
+            https://android.googlesource.com/platform/system/tools/mkbootimg \
+            work/mkbootimg
+
+          chmod +x \
+            work/mkbootimg/unpack_bootimg.py
+
+      # ============================================================
+      # 16. UNPACK BOOT
+      # ============================================================
+      - name: Unpack boot
+        run: |
+          set -euo pipefail
+
+          rm -rf work/unpacked/boot
+          mkdir -p work/unpacked/boot
+
+          python3 \
+            work/mkbootimg/unpack_bootimg.py \
+            --boot_img \
+            work/images/extracted/boot.img \
+            --out \
+            work/unpacked/boot
+
+      # ============================================================
+      # 17. UNPACK VENDOR_BOOT
+      # ============================================================
+      - name: Unpack vendor_boot
+        run: |
+          set -euo pipefail
+
+          rm -rf work/unpacked/vendor_boot
+          mkdir -p work/unpacked/vendor_boot
+
+          python3 \
+            work/mkbootimg/unpack_bootimg.py \
+            --boot_img \
+            work/images/extracted/vendor_boot.img \
+            --out \
+            work/unpacked/vendor_boot
+
+      # ============================================================
+      # 18. EXTRACT VENDOR RAMDISK FRAGMENTS
+      # ============================================================
+      - name: Extract vendor ramdisk fragments
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/rootfs/vendor_boot
+
+          find work/unpacked/vendor_boot \
+            -maxdepth 3 \
+            -type f \
+            -print \
+            | sort
+
+          while IFS= read -r ramdisk; do
+            [ -f "$ramdisk" ] || continue
+
+            name="$(basename "$ramdisk")"
+            output="work/rootfs/vendor_boot/$name"
+
+            echo "Extracting ramdisk:"
+            echo "$ramdisk"
+
+            mkdir -p "$output"
+
+            (
+              cd "$output"
+              cpio -idmu < "$GITHUB_WORKSPACE/$ramdisk" || true
+            )
+
+          done < <(
+            find work/unpacked/vendor_boot \
+              -type f \
+              \( \
+                -name '*ramdisk*' \
+                -o -name 'ramdisk*' \
+              \) \
+              | sort
+          )
+
+      # ============================================================
+      # 19. BUILD COMPLETE STOCK SECURITY SEARCH TREE
+      # ============================================================
+      - name: Build complete stock security search tree
+        run: |
+          set -euo pipefail
+
+          rm -rf work/rootfs/stock_security
+          mkdir -p work/rootfs/stock_security
+
+          copy_tree_if_exists() {
+            local source="$1"
+            local destination="$2"
+
+            if [ -d "$source" ]; then
+              mkdir -p "$destination"
+              cp -a "$source"/. "$destination"/
+            fi
+          }
+
+          copy_tree_if_exists \
+            work/rootfs/vendor \
+            work/rootfs/stock_security/vendor
+
+          copy_tree_if_exists \
+            work/rootfs/vendor_dlkm \
+            work/rootfs/stock_security/vendor_dlkm
+
+          copy_tree_if_exists \
+            work/rootfs/odm_dlkm \
+            work/rootfs/stock_security/odm_dlkm
+
+          copy_tree_if_exists \
+            work/rootfs/system \
+            work/rootfs/stock_security/system
+
+          copy_tree_if_exists \
+            work/rootfs/system_ext \
+            work/rootfs/stock_security/system_ext
+
+          copy_tree_if_exists \
+            work/rootfs/product \
+            work/rootfs/stock_security/product
+
+          copy_tree_if_exists \
+            work/rootfs/vendor_boot \
+            work/rootfs/stock_security/vendor_boot
+
+          find work/rootfs/stock_security \
+            -type f \
+            | sort \
+            > work/security/complete_stock_security_tree.txt
+
+          echo "Stock security tree:"
+          wc -l \
+            work/security/complete_stock_security_tree.txt
+
+      # ============================================================
+      # 20. LOCATE KEYMINT / GATEKEEPER / TEE ROOTS
+      # ============================================================
+      - name: Locate KeyMint GateKeeper TEE roots
+        run: |
+          set -euo pipefail
+
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          KEYMINT_SERVICE="$STOCK_ROOT/vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
+          GATEKEEPER_SERVICE="$STOCK_ROOT/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+          TEE_SUPPLICANT="$STOCK_ROOT/vendor/bin/tee-supplicant"
+
+          test -f "$KEYMINT_SERVICE"
+          test -f "$GATEKEEPER_SERVICE"
+          test -f "$TEE_SUPPLICANT"
+
+          printf '%s\n' "$KEYMINT_SERVICE" > work/security/selected_keymint_service.txt
+          printf '%s\n' "$GATEKEEPER_SERVICE" > work/security/selected_gatekeeper_service.txt
+          printf '%s\n' "$TEE_SUPPLICANT" > work/security/selected_tee_supplicant.txt
+
+          echo "Selected KeyMint:"
+          cat work/security/selected_keymint_service.txt
+          echo
+          echo "Selected GateKeeper:"
+          cat work/security/selected_gatekeeper_service.txt
+          echo
+          echo "Selected TEE supplicant:"
+          cat work/security/selected_tee_supplicant.txt
+
+          find "$STOCK_ROOT" \
+            -type f \
+            \( \
+              -iname '*keymint*' \
+              -o -iname '*gatekeeper*' \
+              -o -iname '*mitee*' \
+              -o -iname '*trustonic*' \
+              -o -iname '*tee*' \
+            \) \
+            -print \
+            | sort \
+            > work/security/security_root_inventory.txt
+
+      # ============================================================
+      # 21. LOCATE SECURITY INIT / VINTF DEFINITIONS
+      # ============================================================
+      - name: Locate security init definitions
+        run: |
+          set -euo pipefail
+
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          find "$STOCK_ROOT/vendor/etc/init" \
+            -type f \
+            \( \
+              -name 'android.hardware.gatekeeper@1.0-service.rc' \
+              -o -name 'android.hardware.security.keymint-service.mitee.rc' \
+              -o -name 'tee-supplicant.rc' \
+            \) \
+            -print \
+            | sort \
+            > work/security/security_init_files.txt
+
+          find "$STOCK_ROOT/vendor/etc/vintf" \
+            -type f \
+            -name 'android.hardware.security.keymint-service.mitee.xml' \
+            -print \
+            | sort \
+            > work/security/security_vintf_files.txt
+
+          echo "Security init files:"
+          cat work/security/security_init_files.txt
+
+          echo
+          echo "Security VINTF files:"
+          cat work/security/security_vintf_files.txt
+
+      # ============================================================
+      # 22. ANALYSE STOCK SECURITY ELFs
+      # ============================================================
+      - name: Analyse stock security ELFs
+        run: |
+          set -euo pipefail
+
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          rm -rf work/security/elf
+          mkdir -p work/security/elf
+
+          while IFS= read -r elf; do
+            [ -f "$elf" ] || continue
+
+            relative="$(realpath --relative-to="$STOCK_ROOT" "$elf")"
+            safe_name="$(echo "$relative" | tr '/:@' '___')"
+
+            file "$elf" || true
+
+            readelf -h "$elf" \
+              > "work/security/elf/$safe_name.header.txt" \
+              || true
+
+            readelf -d "$elf" \
+              > "work/security/elf/$safe_name.dynamic.txt" \
+              || true
+
+            readelf -d "$elf" 2>/dev/null \
+              | sed -n \
+                's/.*Shared library: \[\(.*\)\].*/\1/p' \
+              | sort -u \
+              > "work/security/elf/$safe_name.needed.txt" \
+              || true
+
+          done < <(
+            find "$STOCK_ROOT" \
+              -type f \
+              \( \
+                -name 'android.hardware.security.keymint@1.0-service.mitee' \
+                -o -name 'android.hardware.gatekeeper@1.0-service' \
+                -o -name 'tee-supplicant' \
+                -o -name 'gatekeeper.mitee.so' \
+                -o -name 'android.hardware.gatekeeper@1.0-impl.so' \
+                -o -name 'android.hardware.gatekeeper@1.0.so' \
+                -o -name 'libkeymint.so' \
+                -o -name 'libkeymint_support.so' \
+                -o -name 'libkeymaster4support.so' \
+                -o -name 'libkeymaster_messages.so' \
+                -o -name 'lib_android_keymaster_keymint_utils.so' \
+                -o -name 'libkeymaster_portable.so' \
+                -o -name 'libcppbor_external.so' \
+                -o -name 'libcppcose_rkp.so' \
+                -o -name 'libpuresoftkeymasterdevice.so' \
+                -o -name 'libsoft_attestation_cert.so' \
+                -o -name 'libhidltransport.so' \
+                -o -name 'libhwbinder.so' \
+                -o -name 'libteecli.so' \
+                -o -name 'libmt_mitee.so' \
+                -o -name 'libtida_mitee@1.2.so' \
+                -o -name 'libmfido_mitee.so' \
+                -o -name 'libmlipay_mitee.so' \
+                -o -name 'vendor.xiaomi.hardware.mfidoca@1.0.so' \
+                -o -name 'vendor.xiaomi.hardware.mlipay@1.0.so' \
+                -o -name 'vendor.xiaomi.hardware.mtdservice@1.0.so' \
+                -o -name 'vendor.xiaomi.hardware.tidaservice@1.0.so' \
+                -o -name 'vendor.xiaomi.hardware.tidaservice@1.1.so' \
+                -o -name 'vendor.xiaomi.hardware.tidaservice@1.2.so' \
+                -o -name 'android.hardware.keymaster@3.0.so' \
+                -o -name 'android.hardware.keymaster@4.0.so' \
+                -o -name 'vendor.trustonic.tee@1.0.so' \
+                -o -name 'vendor.trustonic.tee@1.1.so' \
+                -o -name 'libteeservice_client.trustonic.so' \
+              \) \
+              | sort
+          )
+
+      # ============================================================
+      # 23. VERIFY REQUIRED STOCK FBE SECURITY FILES
+      # ============================================================
+      - name: Verify required stock security files
+        run: |
+          set -euo pipefail
+
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          required_paths=(
+            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+            vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+            vendor/bin/tee-supplicant
+            vendor/lib64/libkeymint.so
+            vendor/lib64/libkeymint_support.so
+            vendor/lib64/libkeymaster4support.so
+            vendor/lib64/libkeymaster_messages.so
+            vendor/lib64/lib_android_keymaster_keymint_utils.so
+            vendor/lib64/hw/gatekeeper.mitee.so
+            vendor/lib64/android.hardware.gatekeeper@1.0.so
+            vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so
+            vendor/lib64/libteecli.so
+            vendor/lib64/libmt_mitee.so
+            vendor/lib64/libtida_mitee@1.2.so
+            vendor/lib64/libmfido_mitee.so
+            vendor/lib64/libmlipay_mitee.so
+            vendor/lib64/libhidltransport.so
+            vendor/lib64/libhwbinder.so
+            vendor/lib64/vendor.xiaomi.hardware.mfidoca@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mlipay@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mtdservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.1.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.2.so
+            vendor/lib64/libcppbor_external.so
+            vendor/lib64/libcppcose_rkp.so
+            vendor/lib64/libkeymaster_portable.so
+            vendor/lib64/libpuresoftkeymasterdevice.so
+            vendor/lib64/libsoft_attestation_cert.so
+            vendor/lib64/android.hardware.keymaster@3.0.so
+            vendor/lib64/android.hardware.keymaster@4.0.so
+            system_ext/lib64/libteeservice_client.trustonic.so
+            system_ext/lib64/vendor.trustonic.tee@1.0.so
+            system_ext/lib64/vendor.trustonic.tee@1.1.so
+          )
+
+          for relative in "${required_paths[@]}"; do
+            if [ ! -f "$STOCK_ROOT/$relative" ]; then
+              echo "MISSING REQUIRED STOCK FILE: $relative"
+              exit 1
+            fi
+
+            echo "FOUND: $relative"
+          done
+
+          echo "All report-derived stock security files verified."
+
+      # ============================================================
+      # 24. INTEGRATE STOCK FBE SECURITY COMPONENTS
+      # ============================================================
+      - name: Integrate stock FBE security components
+        run: |
+          set -euo pipefail
+
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
+
+          copy_exact() {
+            local relative="$1"
+            local source="$STOCK/$relative"
+            local destination="$RECOVERY/$relative"
+
+            if [ ! -f "$source" ]; then
+              echo "Missing stock file: $relative"
+              exit 1
+            fi
+
+            mkdir -p "$(dirname "$destination")"
+            cp -f "$source" "$destination"
+            echo "Installed: $relative"
+          }
+
+          # Explicit FBE security stack.
+          copy_exact vendor/bin/tee-supplicant
+          copy_exact vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+          copy_exact vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+          copy_exact vendor/lib64/libkeymint.so
+          copy_exact vendor/lib64/libkeymint_support.so
+          copy_exact vendor/lib64/libkeymaster4support.so
+          copy_exact vendor/lib64/libkeymaster_messages.so
+          copy_exact vendor/lib64/lib_android_keymaster_keymint_utils.so
+          copy_exact vendor/lib64/hw/gatekeeper.mitee.so
+          copy_exact vendor/lib64/android.hardware.gatekeeper@1.0.so
+          copy_exact vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so
+          copy_exact vendor/lib64/libteecli.so
+          copy_exact vendor/lib64/libmt_mitee.so
+          copy_exact vendor/lib64/libtida_mitee@1.2.so
+          copy_exact vendor/lib64/libmfido_mitee.so
+          copy_exact vendor/lib64/libmlipay_mitee.so
+
+          # Dependency closure from the uploaded integration manifest.
+          copy_exact vendor/lib64/libhidltransport.so
+          copy_exact vendor/lib64/libhwbinder.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.mfidoca@1.0.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.mlipay@1.0.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.mtdservice@1.0.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.0.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.1.so
+          copy_exact vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.2.so
+          copy_exact vendor/lib64/libcppbor_external.so
+          copy_exact vendor/lib64/libkeymaster_portable.so
+          copy_exact vendor/lib64/libcppcose_rkp.so
+          copy_exact vendor/lib64/libpuresoftkeymasterdevice.so
+          copy_exact vendor/lib64/libsoft_attestation_cert.so
+          copy_exact vendor/lib64/android.hardware.keymaster@3.0.so
+          copy_exact vendor/lib64/android.hardware.keymaster@4.0.so
+
+          # These Trustonic libraries are actually under system_ext/lib64
+          # in the stock filesystem. Preserve that path.
+          copy_exact system_ext/lib64/libteeservice_client.trustonic.so
+          copy_exact system_ext/lib64/vendor.trustonic.tee@1.0.so
+          copy_exact system_ext/lib64/vendor.trustonic.tee@1.1.so
+
+      # ============================================================
+      # 25. COPY TARGETED STOCK SECURITY INIT / VINTF
+      # ============================================================
+      - name: Integrate stock security init and VINTF
+        run: |
+          set -euo pipefail
+
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
+
+          copy_exact() {
+            local relative="$1"
+            local source="$STOCK/$relative"
+            local destination="$RECOVERY/$relative"
+
+            if [ ! -f "$source" ]; then
+              echo "Missing stock configuration: $relative"
+              exit 1
+            fi
+
+            mkdir -p "$(dirname "$destination")"
+            cp -f "$source" "$destination"
+            echo "Installed: $relative"
+          }
+
+          copy_exact vendor/etc/init/android.hardware.gatekeeper@1.0-service.rc
+          copy_exact vendor/etc/init/android.hardware.security.keymint-service.mitee.rc
+          copy_exact vendor/etc/init/tee-supplicant.rc
+          copy_exact vendor/etc/vintf/manifest/android.hardware.security.keymint-service.mitee.xml
+
+      # ============================================================
+      # 26. FIX GATEKEEPER SERVICE REFERENCES
+      # ============================================================
+      - name: Fix GateKeeper service references
+        run: |
+          set -euo pipefail
+
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
+          ACTUAL="android.hardware.gatekeeper@1.0-service"
+
+          while IFS= read -r rc; do
+            [ -f "$rc" ] || continue
+
+            sed -i \
+              -E \
+              "s#android\.hardware\.gatekeeper@1\.0-service(\.mitee)?#$ACTUAL#g" \
+              "$rc"
+
+          done < <(
+            find "$RECOVERY/vendor/etc/init" \
+              -type f \
+              -name '*gatekeeper*.rc' \
+              | sort
+          )
+
+          echo "Final GateKeeper init references:"
+
+          grep -RniE \
+            'gatekeeper|android\.hardware\.gatekeeper' \
+            "$RECOVERY/vendor/etc/init" \
+            2>/dev/null \
+            || true
+
+      # ============================================================
+      # 27. APPLY STOCK FBE FSTAB CONFIGURATION
+      #
+      # Beryl tree stores recovery.fstab at repository root.
+      # ============================================================
+      - name: Apply stock FBE fstab configuration
+        run: |
+          set -euo pipefail
+
+          FSTAB="$GITHUB_WORKSPACE/recovery.fstab"
+
+          if [ ! -f "$FSTAB" ]; then
+            echo "recovery.fstab not found:"
+            echo "$FSTAB"
+            exit 1
+          fi
+
+          cp "$FSTAB" work/security/recovery.fstab.before-fbe
+
+          python3 - "$FSTAB" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              lines = f.readlines()
+
+          output = []
+
+          for line in lines:
+              stripped = line.strip()
+
+              if stripped.startswith("/data "):
+                  continue
+
+              if stripped.startswith("/metadata "):
+                  continue
+
+              output.append(line)
+
+          output.append(
+              "/metadata ext4 /dev/block/by-name/metadata "
+              "noatime,nosuid,nodev,discard "
+              "wait,check,formattable,first_stage_mount\n"
+          )
+
+          output.append(
+              "/data f2fs /dev/block/by-name/userdata "
+              "flags=display=data,"
+              "inlinecrypt,"
+              "fileencryption=aes-256-xts:aes-256-cts:"
+              "v2+inlinecrypt_optimized,"
+              "keydirectory=/metadata/vold/metadata_encryption,"
+              "gc_merge,atgc,age_extent_cache,noatime,"
+              "nosuid,nodev,discard,noflush_merge,"
+              "fsync_mode=nobarrier,reserve_root=134217,"
+              "resgid=1065,wait,check,formattable,quota,"
+              "latemount,resize,reservedsize=128m,"
+              "checkpoint=fs,fsverity\n"
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.writelines(output)
+          PY
+
+          echo "Final recovery.fstab:"
+          cat "$FSTAB"
+
+      # ============================================================
+      # 28. VERIFY FBE FSTAB
+      # ============================================================
+      - name: Verify FBE fstab
+        run: |
+          set -euo pipefail
+
+          FSTAB="$GITHUB_WORKSPACE/recovery.fstab"
+
+          test -f "$FSTAB"
+          grep -q '^/metadata ' "$FSTAB"
+          grep -q '^/data ' "$FSTAB"
+          grep -q 'inlinecrypt' "$FSTAB"
+          grep -q 'fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized' "$FSTAB"
+          grep -q 'keydirectory=/metadata/vold/metadata_encryption' "$FSTAB"
+
+          echo "FBE fstab configuration verified."
+
+      # ============================================================
+      # 29. VERIFY INTEGRATED SECURITY FILES
+      # ============================================================
+      - name: Verify integrated security files
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          required_paths=(
+            vendor/bin/tee-supplicant
+            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+            vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+            vendor/lib64/libkeymint.so
+            vendor/lib64/libkeymint_support.so
+            vendor/lib64/libkeymaster4support.so
+            vendor/lib64/libkeymaster_messages.so
+            vendor/lib64/lib_android_keymaster_keymint_utils.so
+            vendor/lib64/hw/gatekeeper.mitee.so
+            vendor/lib64/android.hardware.gatekeeper@1.0.so
+            vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so
+            vendor/lib64/libteecli.so
+            vendor/lib64/libmt_mitee.so
+            vendor/lib64/libtida_mitee@1.2.so
+            vendor/lib64/libmfido_mitee.so
+            vendor/lib64/libmlipay_mitee.so
+            vendor/lib64/libhidltransport.so
+            vendor/lib64/libhwbinder.so
+            vendor/lib64/vendor.xiaomi.hardware.mfidoca@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mlipay@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mtdservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.1.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.2.so
+            vendor/lib64/libcppbor_external.so
+            vendor/lib64/libcppcose_rkp.so
+            vendor/lib64/libkeymaster_portable.so
+            vendor/lib64/libpuresoftkeymasterdevice.so
+            vendor/lib64/libsoft_attestation_cert.so
+            vendor/lib64/android.hardware.keymaster@3.0.so
+            vendor/lib64/android.hardware.keymaster@4.0.so
+            system_ext/lib64/libteeservice_client.trustonic.so
+            system_ext/lib64/vendor.trustonic.tee@1.0.so
+            system_ext/lib64/vendor.trustonic.tee@1.1.so
+          )
+
+          for relative in "${required_paths[@]}"; do
+            if [ ! -f "$ROOT/$relative" ]; then
+              echo "Integrated file missing: $relative"
+              exit 1
+            fi
+            echo "VERIFIED: $relative"
+          done
+
+      # ============================================================
+      # 30. VERIFY SECURITY ELF ARCHITECTURES
+      # ============================================================
+      - name: Verify security ELF architectures
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          elf_paths=(
+            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+            vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+            vendor/bin/tee-supplicant
+            vendor/lib64/libkeymint.so
+            vendor/lib64/libkeymint_support.so
+            vendor/lib64/libkeymaster4support.so
+            vendor/lib64/libkeymaster_messages.so
+            vendor/lib64/lib_android_keymaster_keymint_utils.so
+            vendor/lib64/hw/gatekeeper.mitee.so
+            vendor/lib64/android.hardware.gatekeeper@1.0.so
+            vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so
+            vendor/lib64/libteecli.so
+            vendor/lib64/libmt_mitee.so
+            vendor/lib64/libtida_mitee@1.2.so
+            vendor/lib64/libmfido_mitee.so
+            vendor/lib64/libmlipay_mitee.so
+            vendor/lib64/libhidltransport.so
+            vendor/lib64/libhwbinder.so
+            vendor/lib64/vendor.xiaomi.hardware.mfidoca@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mlipay@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.mtdservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.0.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.1.so
+            vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.2.so
+            vendor/lib64/libcppbor_external.so
+            vendor/lib64/libcppcose_rkp.so
+            vendor/lib64/libkeymaster_portable.so
+            vendor/lib64/libpuresoftkeymasterdevice.so
+            vendor/lib64/libsoft_attestation_cert.so
+            vendor/lib64/android.hardware.keymaster@3.0.so
+            vendor/lib64/android.hardware.keymaster@4.0.so
+            system_ext/lib64/libteeservice_client.trustonic.so
+            system_ext/lib64/vendor.trustonic.tee@1.0.so
+            system_ext/lib64/vendor.trustonic.tee@1.1.so
+          )
+
+          for relative in "${elf_paths[@]}"; do
+            elf="$ROOT/$relative"
+
+            test -f "$elf"
+
+            echo
+            echo "============================================================"
+            echo "$relative"
+            echo "============================================================"
+
+            file "$elf"
+            readelf -h "$elf" | grep -E 'Class:|Machine:' || true
+          done
+
+      # ============================================================
+      # 31. VERIFY DIRECT ELF DEPENDENCIES
+      #
+      # Platform dependencies are allowed.
+      # Vendor/security dependencies found in stock MUST be present.
+      # ============================================================
+      - name: Verify direct ELF dependencies
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          missing=0
+
+          is_platform_library() {
+            case "$1" in
+              libc.so|libm.so|libdl.so|liblog.so|libutils.so|libhardware.so|libcutils.so|libbase.so|libbinder.so|libbinder_ndk.so|libhidlbase.so|libhwbinder.so|libc++.so|libcrypto.so|libz.so|libselinux.so|libsysutils.so|libhardware_legacy.so)
+                return 0
+                ;;
+              android.hardware.security.*.so|android.security.*.so|android.system.*.so)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          fbe_elfs=(
+            "$ROOT/vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
+            "$ROOT/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+            "$ROOT/vendor/bin/tee-supplicant"
+            "$ROOT/vendor/lib64/libkeymint.so"
+            "$ROOT/vendor/lib64/libkeymint_support.so"
+            "$ROOT/vendor/lib64/libkeymaster4support.so"
+            "$ROOT/vendor/lib64/libkeymaster_messages.so"
+            "$ROOT/vendor/lib64/lib_android_keymaster_keymint_utils.so"
+            "$ROOT/vendor/lib64/hw/gatekeeper.mitee.so"
+            "$ROOT/vendor/lib64/android.hardware.gatekeeper@1.0.so"
+            "$ROOT/vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so"
+            "$ROOT/vendor/lib64/libteecli.so"
+            "$ROOT/vendor/lib64/libmt_mitee.so"
+            "$ROOT/vendor/lib64/libtida_mitee@1.2.so"
+            "$ROOT/vendor/lib64/libmfido_mitee.so"
+            "$ROOT/vendor/lib64/libmlipay_mitee.so"
+            "$ROOT/vendor/lib64/libhidltransport.so"
+            "$ROOT/vendor/lib64/libhwbinder.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.mfidoca@1.0.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.mlipay@1.0.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.mtdservice@1.0.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.0.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.1.so"
+            "$ROOT/vendor/lib64/vendor.xiaomi.hardware.tidaservice@1.2.so"
+            "$ROOT/vendor/lib64/libcppbor_external.so"
+            "$ROOT/vendor/lib64/libcppcose_rkp.so"
+            "$ROOT/vendor/lib64/libkeymaster_portable.so"
+            "$ROOT/vendor/lib64/libpuresoftkeymasterdevice.so"
+            "$ROOT/vendor/lib64/libsoft_attestation_cert.so"
+            "$ROOT/vendor/lib64/android.hardware.keymaster@3.0.so"
+            "$ROOT/vendor/lib64/android.hardware.keymaster@4.0.so"
+            "$ROOT/system_ext/lib64/libteeservice_client.trustonic.so"
+            "$ROOT/system_ext/lib64/vendor.trustonic.tee@1.0.so"
+            "$ROOT/system_ext/lib64/vendor.trustonic.tee@1.1.so"
+          )
+
+          find_recovery_lib() {
+            find "$ROOT" -type f -name "$1" | sort | head -n 1
+          }
+
+          find_stock_vendor_lib() {
+            find "$STOCK/vendor" -type f \
+              \( -path '*/lib/*' -o -path '*/lib64/*' \) \
+              -name "$1" | sort | head -n 1
+          }
+
+          find_stock_system_ext_trustonic() {
+            case "$1" in
+              libteeservice_client.trustonic.so|vendor.trustonic.tee@1.0.so|vendor.trustonic.tee@1.1.so)
+                find "$STOCK/system_ext" -type f -name "$1" | sort | head -n 1
+                ;;
+              *)
+                return 0
+                ;;
+            esac
+          }
+
+          for elf in "${fbe_elfs[@]}"; do
+            [ -f "$elf" ] || continue
+
+            echo
+            echo "============================================================"
+            echo "Checking: $elf"
+            echo "============================================================"
+
+            while IFS= read -r lib; do
+              [ -n "$lib" ] || continue
+
+              if is_platform_library "$lib"; then
+                echo "PLATFORM: $lib"
+                continue
+              fi
+
+              if [ -n "$(find_recovery_lib "$lib")" ]; then
+                echo "FOUND: $lib"
+                continue
+              fi
+
+              stock_vendor="$(find_stock_vendor_lib "$lib")"
+              if [ -n "$stock_vendor" ]; then
+                echo "MISSING_FROM_RECOVERY: $lib"
+                echo "  STOCK: $stock_vendor"
+                missing=1
+                continue
+              fi
+
+              stock_system_ext="$(find_stock_system_ext_trustonic "$lib")"
+              if [ -n "$stock_system_ext" ]; then
+                echo "MISSING_FROM_RECOVERY: $lib"
+                echo "  STOCK: $stock_system_ext"
+                missing=1
+                continue
+              fi
+
+              echo "UNRESOLVED: $lib"
+              missing=1
+
+            done < <(
+              readelf -d "$elf" 2>/dev/null \
+                | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p' \
+                | sort -u
+            )
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "Non-platform direct ELF dependencies are still missing."
+            exit 1
+          fi
+
+          echo
+          echo "All direct vendor/security dependencies are resolved."
+
+      # ============================================================
+      # 32. VERIFY NO INIT_BOOT
+      # ============================================================
+      - name: Verify no init_boot integration
+        run: |
+          set -euo pipefail
+
+          if find recovery/root \
+            -type f \
+            \( \
+              -name 'init_boot.img' \
+              -o -name '*init_boot*' \
+            \) \
+            | grep -q .; then
+
+            echo "Unexpected init_boot integration detected."
+
+            find recovery/root \
+              -type f \
+              \( \
+                -name 'init_boot.img' \
+                -o -name '*init_boot*' \
+              \)
+
+            exit 1
+          fi
+
+          echo "Correct: no init_boot was added."
+
+      # ============================================================
+      # 33. VERIFY NO SEPARATE ODM PARTITION
+      # ============================================================
+      - name: Verify Beryl partition layout
+        run: |
+          set -euo pipefail
+
+          if grep -RniE \
+            '/dev/block/by-name/odm([^_a-zA-Z]|$)' \
+            recovery/root \
+            recovery.fstab \
+            BoardConfig.mk \
+            device.mk \
+            2>/dev/null; then
+
+            echo "Unexpected separate ODM partition reference detected."
+            exit 1
+          fi
+
+          echo "Correct: no separate ODM partition was added."
+
+      # ============================================================
+      # 34. VERIFY GATEKEEPER FINAL CONFIGURATION
+      # ============================================================
+      - name: Verify GateKeeper final configuration
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          test -f \
+            "$ROOT/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+
+          test -f \
+            "$ROOT/vendor/lib64/hw/gatekeeper.mitee.so"
+
+          echo "Selected GateKeeper executable:"
+          echo "vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+
+          echo
+          echo "GateKeeper init configuration:"
+
+          grep -RniE \
+            'service .*gatekeeper|gatekeeper@1\.0-service|gatekeeper\.mitee' \
+            "$ROOT/vendor/etc/init" \
+            2>/dev/null \
+            || true
+
+      # ============================================================
+      # 35. SHOW FINAL SECURITY TREE
+      # ============================================================
+      - name: Show final security tree
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "FINAL SECURITY TREE"
+          echo "============================================================"
+
+          find recovery/root \
+            -type f \
+            \( \
+              -iname '*keymint*' \
+              -o -iname '*gatekeeper*' \
+              -o -iname '*mitee*' \
+              -o -iname '*tee*' \
+              -o -iname '*trustonic*' \
+              -o -iname '*tidaservice*' \
+              -o -iname '*mtdservice*' \
+              -o -iname '*mfidoca*' \
+              -o -iname '*mlipay*' \
+            \) \
+            | sort
+
+      # ============================================================
+      # 36. SHOW GIT STATUS
+      # ============================================================
+      - name: Show git status
+        run: |
+          set -euo pipefail
+
+          git status --short
+
+          echo
+          echo "============================================================"
+          echo "DIFF STAT"
+          echo "============================================================"
+
+          git diff --stat
+
+      # ============================================================
+      # 37. STAGE FBE INTEGRATION
+      # ============================================================
+      - name: Stage FBE integration
+        run: |
+          set -euo pipefail
+
+          git add \
+            recovery.fstab \
+            BoardConfig.mk \
+            device.mk \
+            recovery/root
+
+          echo "============================================================"
+          echo "STAGED FILES"
+          echo "============================================================"
+
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "ERROR: No changes were staged."
+            exit 1
+          fi
+
+      # ============================================================
+      # 38. COMMIT TO MAIN
+      # ============================================================
+      - name: Commit FBE integration to main
+        run: |
+          set -euo pipefail
+
+          git config \
+            user.name \
+            "github-actions[bot]"
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git commit \
+            -m "beryl: integrate stock FBE KeyMint and GateKeeper"
+
+      # ============================================================
+      # 39. PUSH DIRECTLY TO MAIN
+      # ============================================================
+      - name: Push commit to main
+        run: |
+          set -euo pipefail
+
+          git push origin HEAD:main
+
+      # ============================================================
+      # 40. VERIFY MAIN
+      # ============================================================
+      - name: Verify main branch
+        run: |
+          set -euo pipefail
+
+          git fetch origin main
+
+          LOCAL="$(git rev-parse HEAD)"
+          REMOTE="$(git rev-parse origin/main)"
+
+          echo "Local commit : $LOCAL"
+          echo "Remote main  : $REMOTE"
+
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "ERROR: remote main does not contain the workflow commit."
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "SUCCESS"
+          echo "============================================================"
+
+          echo "FBE integration was committed and pushed directly to main."
