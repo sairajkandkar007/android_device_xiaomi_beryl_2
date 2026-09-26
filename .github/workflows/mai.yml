@@ -243,7 +243,6 @@ jobs:
             echo "============================================================"
             echo "$image"
             echo "============================================================"
-
             file "$image" || true
           done
 
@@ -547,7 +546,6 @@ jobs:
 
           if [ -z "$GATEKEEPER_SERVICE" ]; then
             echo "ERROR: GateKeeper service executable not found."
-            echo
             cat work/security/gatekeeper_files.txt || true
             exit 1
           fi
@@ -607,7 +605,6 @@ jobs:
             [ -f "$elf" ] || continue
 
             relative="${elf#"$STOCK_ROOT"/}"
-
             safe_name="$(echo "$relative" | tr '/:@' '___')"
 
             echo
@@ -683,19 +680,42 @@ jobs:
             libkeymaster_messages.so
           )
 
+          echo "============================================================"
+          echo "VERIFYING REQUIRED STOCK SECURITY FILES"
+          echo "============================================================"
+
           for name in "${required_names[@]}"; do
-            found="$(
+            found=""
+
+            while IFS= read -r candidate; do
+              found="$candidate"
+              break
+            done < <(
               find "$STOCK_ROOT" \
                 -type f \
                 -name "$name" \
-                | sort \
-                | head -n 1
+                | sort
             )
 
             if [ -z "$found" ]; then
               echo
               echo "MISSING REQUIRED STOCK FILE:"
               echo "$name"
+              echo
+              echo "Searching all related stock security files:"
+
+              find "$STOCK_ROOT" \
+                -type f \
+                \( \
+                  -iname "*trustonic*" \
+                  -o -iname "*tee*" \
+                  -o -iname "*mitee*" \
+                  -o -iname "*keymint*" \
+                  -o -iname "*gatekeeper*" \
+                \) \
+                | sort \
+                || true
+
               exit 1
             fi
 
@@ -703,18 +723,36 @@ jobs:
             echo "$found"
           done
 
-          GATEKEEPER_SERVICE="$(
-            cat work/security/selected_gatekeeper_service.txt
-          )"
+          echo
+          echo "============================================================"
+          echo "VERIFY SELECTED GATEKEEPER"
+          echo "============================================================"
 
-          if [ ! -f "$GATEKEEPER_SERVICE" ]; then
-            echo "Selected GateKeeper service disappeared."
+          if [ ! -f work/security/selected_gatekeeper_service.txt ]; then
+            echo "selected_gatekeeper_service.txt is missing."
             exit 1
           fi
 
-          echo
-          echo "Selected GateKeeper service:"
+          GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
+
+          if [ -z "$GATEKEEPER_SERVICE" ]; then
+            echo "Selected GateKeeper service is empty."
+            exit 1
+          fi
+
+          if [ ! -f "$GATEKEEPER_SERVICE" ]; then
+            echo "Selected GateKeeper service does not exist:"
+            echo "$GATEKEEPER_SERVICE"
+            exit 1
+          fi
+
+          echo "Selected GateKeeper:"
           echo "$GATEKEEPER_SERVICE"
+
+          echo
+          echo "============================================================"
+          echo "ALL REQUIRED STOCK SECURITY FILES VERIFIED"
+          echo "============================================================"
 
       # 24. COPY STOCK SECURITY COMPONENTS
       - name: Integrate stock FBE security components
@@ -751,6 +789,7 @@ jobs:
               echo "$name"
               echo
               echo "Related stock security files:"
+
               find "$STOCK" \
                 -type f \
                 \( \
@@ -760,6 +799,7 @@ jobs:
                 \) \
                 | sort \
                 || true
+
               exit 1
             fi
 
@@ -824,9 +864,7 @@ jobs:
           copy_stock_file \
             libkeymaster_messages.so
 
-          GATEKEEPER_SERVICE="$(
-            cat work/security/selected_gatekeeper_service.txt
-          )"
+          GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
 
           relative="${GATEKEEPER_SERVICE#"$STOCK"/}"
 
@@ -844,7 +882,7 @@ jobs:
           echo
           echo "Final integrated security files:"
 
-          find "$RECOVERY/vendor" \
+          find "$RECOVERY" \
             -type f \
             \( \
               -name '*keymint*' \
@@ -937,9 +975,7 @@ jobs:
 
           RECOVERY="$GITHUB_WORKSPACE/recovery/root"
 
-          GATEKEEPER_SERVICE="$(
-            cat work/security/selected_gatekeeper_service.txt
-          )"
+          GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
 
           relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
 
@@ -1134,9 +1170,7 @@ jobs:
 
           done
 
-          GATEKEEPER_SERVICE="$(
-            cat work/security/selected_gatekeeper_service.txt
-          )"
+          GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
 
           relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
 
@@ -1326,9 +1360,7 @@ jobs:
 
           ROOT="$GITHUB_WORKSPACE/recovery/root"
 
-          GATEKEEPER_SERVICE="$(
-            cat work/security/selected_gatekeeper_service.txt
-          )"
+          GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
 
           relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
 
