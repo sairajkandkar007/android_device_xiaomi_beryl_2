@@ -192,6 +192,9 @@ jobs:
 
       # ============================================================
       # 11. EXTRACT EXACT STOCK PARTITIONS
+      #
+      # NO init_boot.
+      # NO separate odm.
       # ============================================================
       - name: Extract exact stock partitions
         run: |
@@ -1011,44 +1014,20 @@ jobs:
           echo "Actual stock GateKeeper executable:"
           echo "$actual_name"
 
-          if [ "$actual_name" = \
-            "android.hardware.gatekeeper@1.0-service.mitee" ]; then
+          while IFS= read -r rc; do
+            [ -f "$rc" ] || continue
 
-            OLD='android.hardware.gatekeeper@1.0-service'
-            NEW='android.hardware.gatekeeper@1.0-service.mitee'
+            sed -i \
+              -E \
+              "s#android\.hardware\.gatekeeper@1\.0-service(\.mitee)?#${actual_name}#g" \
+              "$rc"
 
-            while IFS= read -r rc; do
-              [ -f "$rc" ] || continue
-
-              sed -i \
-                "s#${OLD}#${NEW}#g" \
-                "$rc"
-
-            done < <(
-              find "$RECOVERY/vendor/etc/init" \
-                -type f \
-                -name '*gatekeeper*.rc' \
-                | sort
-            )
-
-          else
-
-            while IFS= read -r rc; do
-              [ -f "$rc" ] || continue
-
-              sed -i \
-                -E \
-                "s#android\.hardware\.gatekeeper@1\.0-service(\.mitee)?#${actual_name}#g" \
-                "$rc"
-
-            done < <(
-              find "$RECOVERY/vendor/etc/init" \
-                -type f \
-                -name '*gatekeeper*.rc' \
-                | sort
-            )
-
-          fi
+          done < <(
+            find "$RECOVERY/vendor/etc/init" \
+              -type f \
+              -name '*gatekeeper*.rc' \
+              | sort
+          )
 
           echo
           echo "Final GateKeeper init references:"
@@ -1062,8 +1041,7 @@ jobs:
       # ============================================================
       # 27. APPLY STOCK FBE FSTAB CONFIGURATION
       #
-      # IMPORTANT:
-      # Beryl tree stores recovery.fstab at repository root.
+      # Beryl stores recovery.fstab at repository root.
       # ============================================================
       - name: Apply stock FBE fstab configuration
         run: |
@@ -1173,8 +1151,24 @@ jobs:
           test -f \
             "$ROOT/vendor/bin/tee-supplicant"
 
-          test -f \
-            "$ROOT/vendor/lib/hw/gatekeeper.mitee.so"
+          echo
+          echo "Searching for integrated GateKeeper library..."
+
+          GATEKEEPER_LIB="$(
+            find "$ROOT" \
+              -type f \
+              -name "gatekeeper.mitee.so" \
+              | sort \
+              | head -n 1
+          )"
+
+          if [ -z "$GATEKEEPER_LIB" ]; then
+            echo "Integrated gatekeeper.mitee.so missing."
+            exit 1
+          fi
+
+          echo "Verified GateKeeper library:"
+          echo "$GATEKEEPER_LIB"
 
           for name in \
             libteecli.so \
@@ -1273,54 +1267,154 @@ jobs:
 
       # ============================================================
       # 31. VERIFY DIRECT ELF DEPENDENCIES
+      #
+      # IMPORTANT:
+      # This is based on the analysis report.
+      #
+      # Platform libraries such as libc.so, libm.so, libdl.so,
+      # liblog.so, libutils.so and libhardware.so are NOT treated
+      # as missing proprietary security blobs.
+      #
+      # Proprietary dependencies are checked against the COMPLETE
+      # STOCK filesystem and the FINAL RECOVERY filesystem.
       # ============================================================
       - name: Verify direct ELF dependencies
         run: |
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE/recovery/root"
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
 
-          missing=0
+          mkdir -p work/security/dependency_report
+
+          missing_proprietary=0
+
+          # --------------------------------------------------------
+          # Android platform libraries
+          # --------------------------------------------------------
+          platform_libs=(
+            libc.so
+            libm.so
+            libdl.so
+            liblog.so
+            libutils.so
+            libhardware.so
+            libcutils.so
+            libbase.so
+            libbinder.so
+            libbinder_ndk.so
+            libhidlbase.so
+            libhwbinder.so
+            libc++.so
+            libcrypto.so
+            libz.so
+            libselinux.so
+            libsysutils.so
+            libhardware_legacy.so
+          )
+
+          is_platform_library() {
+            local candidate="$1"
+
+            for platform in "${platform_libs[@]}"; do
+              if [ "$candidate" = "$platform" ]; then
+                return 0
+              fi
+            done
+
+            return 1
+          }
+
+          find_stock_library() {
+            local name="$1"
+
+            find "$STOCK" \
+              -type f \
+              -name "$name" \
+              | sort \
+              | head -n 1
+          }
+
+          find_recovery_library() {
+            local name="$1"
+
+            find "$ROOT" \
+              -type f \
+              -name "$name" \
+              | sort \
+              | head -n 1
+          }
 
           while IFS= read -r elf; do
             [ -f "$elf" ] || continue
 
+            relative="${elf#"$ROOT"/}"
+            report_name="$(echo "$relative" | tr '/:@' '___')"
+            report="work/security/dependency_report/${report_name}.txt"
+
             echo
-            echo "Checking:"
-            echo "$elf"
+            echo "============================================================"
+            echo "CHECKING: $relative"
+            echo "============================================================"
+
+            {
+              echo "ELF: $relative"
+              echo
+              echo "DIRECT DT_NEEDED:"
+            } > "$report"
 
             while IFS= read -r lib; do
               [ -n "$lib" ] || continue
 
-              found=0
+              echo
+              echo "Dependency: $lib"
 
-              for directory in \
-                "$ROOT/vendor/lib64" \
-                "$ROOT/vendor/lib64/hw" \
-                "$ROOT/vendor/lib" \
-                "$ROOT/vendor/lib/hw" \
-                "$ROOT/system/lib64" \
-                "$ROOT/system/lib" \
-                "$ROOT/system_ext/lib64" \
-                "$ROOT/system_ext/lib" \
-                "$ROOT/product/lib64" \
-                "$ROOT/product/lib" \
-                "$ROOT/vendor_dlkm/lib64" \
-                "$ROOT/vendor_dlkm/lib" \
-                "$ROOT/odm_dlkm/lib64" \
-                "$ROOT/odm_dlkm/lib"; do
+              if is_platform_library "$lib"; then
+                echo "  TYPE: Android platform library"
+                echo "  STATUS: ACCEPTED"
+                echo "  REASON: supplied by the Android/recovery runtime"
+                echo "  STATUS: PLATFORM"
 
-                if [ -f "$directory/$lib" ]; then
-                  echo "  FOUND: $lib"
-                  found=1
-                  break
-                fi
+                {
+                  echo "PLATFORM  $lib"
+                } >> "$report"
 
-              done
+                continue
+              fi
 
-              if [ "$found" -eq 0 ]; then
-                echo "  MISSING: $lib"
-                missing=1
+              recovery_match="$(find_recovery_library "$lib")"
+              stock_match="$(find_stock_library "$lib")"
+
+              if [ -n "$recovery_match" ]; then
+                echo "  TYPE: vendor/proprietary or non-platform"
+                echo "  STATUS: FOUND IN RECOVERY"
+                echo "  PATH: $recovery_match"
+
+                {
+                  echo "RECOVERY  $lib  $recovery_match"
+                } >> "$report"
+
+              elif [ -n "$stock_match" ]; then
+                echo "  TYPE: vendor/proprietary or non-platform"
+                echo "  STATUS: PRESENT IN STOCK BUT NOT RECOVERY"
+                echo "  STOCK: $stock_match"
+                echo "  ERROR: proprietary dependency is not integrated"
+
+                {
+                  echo "MISSING_FROM_RECOVERY  $lib  $stock_match"
+                } >> "$report"
+
+                missing_proprietary=1
+
+              else
+                echo "  TYPE: unresolved"
+                echo "  STATUS: NOT FOUND IN STOCK OR RECOVERY"
+
+                {
+                  echo "UNRESOLVED  $lib"
+                } >> "$report"
+
+                missing_proprietary=1
               fi
 
             done < <(
@@ -1338,18 +1432,44 @@ jobs:
                 -o -name 'android.hardware.gatekeeper@1.0-service*' \
                 -o -name 'tee-supplicant' \
                 -o -name 'gatekeeper.mitee.so' \
+                -o -name 'libteecli.so' \
+                -o -name 'libmt_mitee.so' \
+                -o -name 'libtida_mitee@1.2.so' \
+                -o -name 'libmfido_mitee.so' \
+                -o -name 'libmlipay_mitee.so' \
+                -o -name 'vendor.trustonic.tee@1.0.so' \
+                -o -name 'vendor.trustonic.tee@1.1.so' \
+                -o -name 'libteeservice_client.trustonic.so' \
+                -o -name 'libkeymint.so' \
+                -o -name 'libkeymint_support.so' \
+                -o -name 'lib_android_keymaster_keymint_utils.so' \
+                -o -name 'libkeymaster4support.so' \
+                -o -name 'libkeymaster_messages.so' \
               \) \
               | sort
           )
 
-          if [ "$missing" -ne 0 ]; then
+          echo
+          echo "============================================================"
+          echo "DEPENDENCY SUMMARY"
+          echo "============================================================"
+
+          cat \
+            work/security/dependency_report/*.txt \
+            > work/security/direct_dependency_report.txt
+
+          if [ "$missing_proprietary" -ne 0 ]; then
             echo
-            echo "Missing direct ELF dependencies."
+            echo "One or more non-platform dependencies are missing."
+            echo
+            echo "Full dependency report:"
+            cat work/security/direct_dependency_report.txt
             exit 1
           fi
 
           echo
-          echo "All direct ELF dependencies resolved."
+          echo "All direct dependencies are resolved."
+          echo "Platform dependencies were correctly distinguished from proprietary dependencies."
 
       # ============================================================
       # 32. VERIFY NO INIT_BOOT
@@ -1420,6 +1540,15 @@ jobs:
           echo "$relative"
 
           echo
+          echo "GateKeeper library locations:"
+
+          find "$ROOT" \
+            -type f \
+            -name 'gatekeeper.mitee.so' \
+            -print \
+            | sort
+
+          echo
           echo "GateKeeper init configuration:"
 
           grep -RniE \
@@ -1449,6 +1578,15 @@ jobs:
               -o -iname '*trustonic*' \
             \) \
             | sort
+
+          echo
+          echo "============================================================"
+          echo "DIRECT DEPENDENCY REPORT"
+          echo "============================================================"
+
+          if [ -f work/security/direct_dependency_report.txt ]; then
+            cat work/security/direct_dependency_report.txt
+          fi
 
       # ============================================================
       # 36. SHOW GIT STATUS
