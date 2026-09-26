@@ -213,63 +213,180 @@ jobs:
 
       # ============================================================
       # 12. VERIFY EXTRACTED PARTITIONS
+      #
+      # FIXED:
+      # - Do not fail silently on the first missing file.
+      # - Check every requested partition.
+      # - Record FOUND and MISSING separately.
+      # - Print the complete payload partition list.
+      # - Distinguish missing payload partitions from extraction
+      #   failures.
       # ============================================================
       - name: Verify extracted partitions
         run: |
           set -euo pipefail
 
-          echo "===== ACTUAL EXTRACTED FILES ====="
-          find work/partitions \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f %s bytes\n' \
-            | sort
+          echo "============================================================"
+          echo "ACTUAL EXTRACTED PARTITION FILES"
+          echo "============================================================"
+
+          if [ -d work/partitions ]; then
+            find work/partitions \
+              -maxdepth 1 \
+              -type f \
+              -printf '%f %s bytes\n' \
+              | sort
+          else
+            echo "ERROR: work/partitions does not exist."
+            exit 1
+          fi
 
           echo
-          echo "===== REQUIRED PARTITIONS ====="
+          echo "============================================================"
+          echo "REQUIRED PARTITIONS"
+          echo "============================================================"
 
-          REQUIRED="vendor vendor_dlkm odm_dlkm system system_ext product init_boot boot dtbo vendor_boot vbmeta vbmeta_system vbmeta_vendor"
+          REQUIRED=(
+            vendor
+            vendor_dlkm
+            odm_dlkm
+            system
+            system_ext
+            product
+            init_boot
+            boot
+            dtbo
+            vendor_boot
+            vbmeta
+            vbmeta_system
+            vbmeta_vendor
+          )
 
-          FAILED=0
+          FOUND_FILE="work/analysis/extracted_partitions_found.txt"
+          MISSING_FILE="work/analysis/extracted_partitions_missing.txt"
 
-          for p in $REQUIRED; do
+          : > "$FOUND_FILE"
+          : > "$MISSING_FILE"
+
+          FOUND_COUNT=0
+          MISSING_COUNT=0
+
+          for p in "${REQUIRED[@]}"; do
+
             IMG="work/partitions/${p}.img"
 
-            if [ -s "$IMG" ]; then
-              echo "OK: $p -> $IMG"
+            if [ -f "$IMG" ] && [ -s "$IMG" ]; then
+
+              SIZE="$(stat -c '%s' "$IMG")"
+
+              echo "FOUND   : $p.img (${SIZE} bytes)"
+
+              echo "$p.img $SIZE" \
+                >> "$FOUND_FILE"
+
+              FOUND_COUNT=$((FOUND_COUNT + 1))
+
             else
-              echo "MISSING: $p -> $IMG"
-              FAILED=1
+
+              echo "MISSING : $p.img"
+
+              echo "$p.img" \
+                >> "$MISSING_FILE"
+
+              MISSING_COUNT=$((MISSING_COUNT + 1))
+
             fi
+
           done
 
           echo
-          echo "===== PAYLOAD PARTITION LIST ====="
+          echo "============================================================"
+          echo "PAYLOAD PARTITION LIST"
+          echo "============================================================"
 
-          python3 -m payload_dumper \
+          PAYLOAD_LIST="work/analysis/payload_partitions.txt"
+
+          if python3 -m payload_dumper \
             -l \
             work/payload.bin \
-            | tee work/analysis/payload_partitions.txt
+            > "$PAYLOAD_LIST"
+          then
+            cat "$PAYLOAD_LIST"
+          else
+            echo "ERROR: unable to obtain payload partition list."
+            exit 1
+          fi
 
           echo
-          echo "===== EXTRACTION DIRECTORY ====="
+          echo "============================================================"
+          echo "VERIFICATION SUMMARY"
+          echo "============================================================"
+
+          echo "Required partitions : ${#REQUIRED[@]}"
+          echo "Extracted           : $FOUND_COUNT"
+          echo "Missing             : $MISSING_COUNT"
+
+          echo
+          echo "----- FOUND -----"
+
+          if [ -s "$FOUND_FILE" ]; then
+            cat "$FOUND_FILE"
+          else
+            echo "None"
+          fi
+
+          echo
+          echo "----- MISSING -----"
+
+          if [ -s "$MISSING_FILE" ]; then
+            cat "$MISSING_FILE"
+          else
+            echo "None"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "EXTRACTION DIRECTORY"
+          echo "============================================================"
 
           du -sh work/partitions
+
           find work/partitions \
             -maxdepth 1 \
             -type f \
             -printf '%f\n' \
             | sort
 
-          if [ "$FAILED" -ne 0 ]; then
+          echo
+
+          if [ "$MISSING_COUNT" -ne 0 ]; then
+
+            echo "============================================================"
+            echo "ERROR: REQUIRED PARTITIONS ARE MISSING"
+            echo "============================================================"
+
             echo
-            echo "ERROR: One or more required partition images were not extracted."
-            echo "The payload partition list above shows what actually exists."
+            echo "The following requested images were not produced:"
+            cat "$MISSING_FILE"
+
+            echo
+            echo "Compare the missing names above with:"
+            echo "work/analysis/payload_partitions.txt"
+
+            echo
+            echo "Interpretation:"
+            echo "  - If a partition is absent from the payload list,"
+            echo "    it is not contained in this payload under that name."
+            echo "  - If it is present in the payload list but its .img"
+            echo "    is missing here, extraction did not produce it."
+
             exit 1
           fi
 
           echo
-          echo "All required partitions were extracted successfully."
+          echo "============================================================"
+          echo "ALL REQUIRED PARTITIONS WERE EXTRACTED"
+          echo "============================================================"
 
       # ============================================================
       # 13. IDENTIFY FILESYSTEMS
