@@ -1,6 +1,6 @@
 #
 # OrangeFox device configuration for Xiaomi/Redmi beryl
-# Target: vendor_boot recovery, boot/display/touch bring-up
+# Target: vendor_boot recovery + FBE/decryption
 #
 
 DEVICE_PATH := device/xiaomi/beryl
@@ -41,6 +41,7 @@ TARGET_2ND_CPU_VARIANT := generic
 TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a55
 
 OVERRIDE_TARGET_FLATTEN_APEX := true
+
 TARGET_BOOTLOADER_BOARD_NAME := beryl
 TARGET_NO_BOOTLOADER := true
 TARGET_SCREEN_DENSITY := 450
@@ -80,29 +81,36 @@ endif
 BOARD_FLASH_BLOCK_SIZE := 262144
 BOARD_BOOTIMAGE_PARTITION_SIZE := 134217728
 BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864
-BOARD_INIT_BOOT_IMAGE_PARTITION_SIZE := 8388608
 BOARD_RECOVERYIMAGE_PARTITION_SIZE := 67108864
 
 # Filesystems
+# Stock dynamic partitions are EROFS.
 BOARD_HAS_LARGE_FILESYSTEM := true
-BOARD_SYSTEMIMAGE_PARTITION_TYPE := ext4
-BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
-TARGET_USERIMAGES_USE_EXT4 := true
-TARGET_USERIMAGES_USE_F2FS := true
+
+BOARD_SYSTEMIMAGE_PARTITION_TYPE := erofs
+BOARD_SYSTEM_EXTIMAGE_FILE_SYSTEM_TYPE := erofs
+BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := erofs
+BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := erofs
+BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := erofs
+BOARD_ODM_DLKMIMAGE_FILE_SYSTEM_TYPE := erofs
+
+# Userdata is stock F2FS.
+BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := f2fs
+
 TARGET_COPY_OUT_VENDOR := vendor
 
 # Dynamic partitions
 BOARD_SUPER_PARTITION_SIZE := 9126805504
 BOARD_SUPER_PARTITION_GROUPS := xiaomi_dynamic_partitions
+
 BOARD_XIAOMI_DYNAMIC_PARTITIONS_PARTITION_LIST := \
     system \
     system_ext \
     product \
     vendor \
     vendor_dlkm \
-    odm \
     odm_dlkm
+
 BOARD_XIAOMI_DYNAMIC_PARTITIONS_SIZE := 9122611200
 
 # AVB
@@ -118,5 +126,5 @@ TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_USE_TOOLBOX := true
 TW_INCLUDE_REPACKTOOLS := true
 
-# Boot/display/touch bring-up only.
-# FBE/decryption is intentionally not enabled here.
+# FBE/decryption
+# Do NOT define OF_SKIP_FBE_DECRYPTION.
