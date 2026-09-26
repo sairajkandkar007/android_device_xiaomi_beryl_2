@@ -207,7 +207,7 @@ jobs:
 
           python3 -m payload_dumper \
             -o work/partitions \
-            -p vendor vendor_dlkm odm_dlkm system system_ext product init_boot boot dtbo vendor_boot vbmeta vbmeta_system vbmeta_vendor \
+            -p vendor vendor_dlkm odm_dlkm system system_ext product boot dtbo vendor_boot vbmeta vbmeta_system vbmeta_vendor \
             -j 8 \
             work/payload.bin
 
