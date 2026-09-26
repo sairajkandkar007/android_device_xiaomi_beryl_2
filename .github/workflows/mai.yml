@@ -31,22 +31,23 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install -y \
-            aria2 \
-            unzip \
-            p7zip-full \
-            python3 \
-            python3-pip \
-            file \
-            cpio \
-            lz4 \
-            e2fsprogs \
-            rsync \
-            binutils \
-            gzip \
-            xz-utils \
-            zstd \
-            curl \
-            git
+           aria2 \
+           unzip \
+           p7zip-full \
+           python3 \
+           python3-pip \
+           file \
+           cpio \
+           lz4 \
+           e2fsprogs \
+           erofs-utils \
+           rsync \
+           binutils \
+           gzip \
+           xz-utils \
+           zstd \
+           curl \
+           git
 
           python3 -m pip install --upgrade pip
           python3 -m pip install android-payload-dumper==2.3.0
