@@ -17,7 +17,6 @@ FOX_VENDOR_BOOT_RECOVERY := 1
 
 # Bring-up scope: boot + display + touch only.
 # Do not attempt FBE/decryption in this build.
-OF_SKIP_FBE_DECRYPTION := 1
 
 OF_NO_TREBLE_COMPATIBILITY_CHECK := 1
 OF_USE_LZ4_COMPRESSION := 1
