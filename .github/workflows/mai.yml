@@ -57,14 +57,16 @@ jobs:
           set -euo pipefail
 
           rm -rf work
-          mkdir -p work
-          mkdir -p work/rom
-          mkdir -p work/payload
-          mkdir -p work/images
-          mkdir -p work/rootfs
-          mkdir -p work/rootfs/stock_security
-          mkdir -p work/unpacked
-          mkdir -p work/security
+
+          mkdir -p \
+            work/rom \
+            work/payload \
+            work/images \
+            work/images/extracted \
+            work/rootfs \
+            work/rootfs/stock_security \
+            work/unpacked \
+            work/security
 
       # ============================================================
       # 4. STOCK ROM VARIABLES
@@ -85,7 +87,9 @@ jobs:
           set -euo pipefail
 
           echo "Testing stock ROM CDN..."
-          curl -L \
+
+          curl \
+            -L \
             --range 0-1048575 \
             --silent \
             --show-error \
@@ -119,7 +123,9 @@ jobs:
           test -f "work/rom/$ROM_FILENAME"
           test -s "work/rom/$ROM_FILENAME"
 
-          unzip -t "work/rom/$ROM_FILENAME" >/dev/null
+          unzip -t \
+            "work/rom/$ROM_FILENAME" \
+            >/dev/null
 
           echo "ROM verified:"
           ls -lh "work/rom/$ROM_FILENAME"
@@ -155,14 +161,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          PAYLOAD_PATH="$(find work/rom_extracted -type f -name payload.bin | head -n 1)"
+          PAYLOAD_PATH="$(
+            find work/rom_extracted \
+              -type f \
+              -name payload.bin \
+              | head -n 1
+          )"
 
           if [ -z "$PAYLOAD_PATH" ]; then
             echo "payload.bin not found"
             exit 1
           fi
 
-          cp "$PAYLOAD_PATH" work/payload/payload.bin
+          cp \
+            "$PAYLOAD_PATH" \
+            work/payload/payload.bin
 
           echo "PAYLOAD_PATH=work/payload/payload.bin" >> "$GITHUB_ENV"
 
@@ -186,9 +199,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf work/images/extracted
-          mkdir -p work/images/extracted
-
           payload-dumper \
             "$PAYLOAD_PATH" \
             -o work/images/extracted \
@@ -207,6 +217,7 @@ jobs:
               vbmeta_vendor
 
           echo "Extracted partitions:"
+
           find work/images/extracted \
             -maxdepth 1 \
             -type f \
@@ -288,7 +299,10 @@ jobs:
 
             if file "$image" | grep -qi "EROFS"; then
               echo "Extracting EROFS: $name"
-              fsck.erofs --extract="$output" "$image"
+
+              fsck.erofs \
+                --extract="$output" \
+                "$image"
             else
               echo "$name is not EROFS; skipping."
             fi
@@ -313,7 +327,8 @@ jobs:
             https://android.googlesource.com/platform/system/tools/mkbootimg \
             work/mkbootimg
 
-          chmod +x work/mkbootimg/unpack_bootimg.py
+          chmod +x \
+            work/mkbootimg/unpack_bootimg.py
 
       # ============================================================
       # 16. UNPACK BOOT
@@ -359,26 +374,36 @@ jobs:
           mkdir -p work/rootfs/vendor_boot
 
           find work/unpacked/vendor_boot \
-            -type f \
             -maxdepth 3 \
+            -type f \
             -print \
             | sort
 
-          for ramdisk in \
-            work/unpacked/vendor_boot/*ramdisk* \
-            work/unpacked/vendor_boot/ramdisk*; do
+          while IFS= read -r ramdisk; do
+            [ -f "$ramdisk" ] || continue
 
-            if [ -f "$ramdisk" ]; then
-              echo "Extracting ramdisk: $ramdisk"
+            name="$(basename "$ramdisk")"
+            output="work/rootfs/vendor_boot/$name"
 
-              mkdir -p "work/rootfs/vendor_boot/$(basename "$ramdisk")"
+            echo "Extracting ramdisk:"
+            echo "$ramdisk"
 
-              (
-                cd "work/rootfs/vendor_boot/$(basename "$ramdisk")"
-                cpio -idmv < "$GITHUB_WORKSPACE/$ramdisk" || true
-              )
-            fi
-          done
+            mkdir -p "$output"
+
+            (
+              cd "$output"
+              cpio -idmu < "$GITHUB_WORKSPACE/$ramdisk" || true
+            )
+
+          done < <(
+            find work/unpacked/vendor_boot \
+              -type f \
+              \( \
+                -name '*ramdisk*' \
+                -o -name 'ramdisk*' \
+              \) \
+              | sort
+          )
 
       # ============================================================
       # 19. BUILD COMPLETE STOCK SECURITY SEARCH TREE
@@ -388,6 +413,7 @@ jobs:
           set -euo pipefail
 
           rm -rf work/rootfs/stock_security
+
           mkdir -p work/rootfs/stock_security
 
           copy_tree_if_exists() {
@@ -433,7 +459,9 @@ jobs:
             | sort \
             > work/security/complete_stock_security_tree.txt
 
-          wc -l work/security/complete_stock_security_tree.txt
+          echo "Stock security tree:"
+          wc -l \
+            work/security/complete_stock_security_tree.txt
 
       # ============================================================
       # 20. LOCATE KEYMINT / GATEKEEPER / TEE ROOTS
@@ -442,33 +470,155 @@ jobs:
         run: |
           set -euo pipefail
 
-          SECURITY_ROOTS=(
-            android.hardware.security.keymint@1.0-service.mitee
-            android.hardware.gatekeeper@1.0-service.mitee
-            tee-supplicant
-          )
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
 
-          : > work/security/security_roots.txt
+          mkdir -p work/security
 
-          for root in "${SECURITY_ROOTS[@]}"; do
-            echo
-            echo "============================================================"
-            echo "Searching: $root"
-            echo "============================================================"
+          echo "============================================================"
+          echo "KEYMINT FILES"
+          echo "============================================================"
 
-            find work/rootfs/stock_security \
+          find "$STOCK_ROOT" \
+            -type f \
+            \( \
+              -name '*keymint*' \
+              -o -name '*KeyMint*' \
+            \) \
+            -print \
+            | sort \
+            | tee work/security/keymint_files.txt
+
+          echo
+          echo "============================================================"
+          echo "GATEKEEPER FILES"
+          echo "============================================================"
+
+          find "$STOCK_ROOT" \
+            -type f \
+            \( \
+              -name '*gatekeeper*' \
+              -o -name '*GateKeeper*' \
+            \) \
+            -print \
+            | sort \
+            | tee work/security/gatekeeper_files.txt
+
+          echo
+          echo "============================================================"
+          echo "TEE FILES"
+          echo "============================================================"
+
+          find "$STOCK_ROOT" \
+            -type f \
+            \( \
+              -name '*tee*' \
+              -o -name '*TEE*' \
+              -o -name '*trustonic*' \
+            \) \
+            -print \
+            | sort \
+            | tee work/security/tee_files.txt
+
+          echo
+          echo "============================================================"
+          echo "GATEKEEPER SERVICE CANDIDATES"
+          echo "============================================================"
+
+          find "$STOCK_ROOT" \
+            -type f \
+            \( \
+              -name 'android.hardware.gatekeeper@1.0-service' \
+              -o -name 'android.hardware.gatekeeper@1.0-service.mitee' \
+              -o -name '*gatekeeper*service*' \
+            \) \
+            -print \
+            | sort \
+            | tee work/security/gatekeeper_service_candidates.txt
+
+          echo
+          echo "============================================================"
+          echo "GATEKEEPER INIT REFERENCES"
+          echo "============================================================"
+
+          grep -RniE \
+            'gatekeeper|android\.hardware\.gatekeeper' \
+            "$STOCK_ROOT/vendor/etc/init" \
+            "$STOCK_ROOT/vendor/etc/vintf" \
+            2>/dev/null \
+            | tee work/security/gatekeeper_init_references.txt \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "REQUIRED ROOT CHECK"
+          echo "============================================================"
+
+          KEYMINT_SERVICE="$(
+            find "$STOCK_ROOT" \
               -type f \
-              -name "$root" \
-              -print \
-              | tee -a work/security/security_roots.txt
-          done
+              -name 'android.hardware.security.keymint@1.0-service.mitee' \
+              | sort \
+              | head -n 1
+          )"
 
-          for root in "${SECURITY_ROOTS[@]}"; do
-            if ! grep -qE "/${root}$" work/security/security_roots.txt; then
-              echo "Required security root not found: $root"
-              exit 1
-            fi
-          done
+          TEE_SUPPLICANT="$(
+            find "$STOCK_ROOT" \
+              -type f \
+              -name 'tee-supplicant' \
+              | sort \
+              | head -n 1
+          )"
+
+          GATEKEEPER_SERVICE="$(
+            find "$STOCK_ROOT" \
+              -type f \
+              \( \
+                -name 'android.hardware.gatekeeper@1.0-service.mitee' \
+                -o -name 'android.hardware.gatekeeper@1.0-service' \
+                -o -name '*gatekeeper*service*' \
+              \) \
+              | sort \
+              | head -n 1
+          )"
+
+          if [ -z "$KEYMINT_SERVICE" ]; then
+            echo "ERROR: KeyMint Mitee service not found."
+            exit 1
+          fi
+
+          if [ -z "$TEE_SUPPLICANT" ]; then
+            echo "ERROR: tee-supplicant not found."
+            exit 1
+          fi
+
+          if [ -z "$GATEKEEPER_SERVICE" ]; then
+            echo "ERROR: GateKeeper service executable not found."
+            echo
+            echo "GateKeeper search results:"
+            cat work/security/gatekeeper_files.txt || true
+            exit 1
+          fi
+
+          echo "$KEYMINT_SERVICE" \
+            > work/security/selected_keymint_service.txt
+
+          echo "$GATEKEEPER_SERVICE" \
+            > work/security/selected_gatekeeper_service.txt
+
+          echo "$TEE_SUPPLICANT" \
+            > work/security/selected_tee_supplicant.txt
+
+          echo
+          echo "Selected KeyMint:"
+          cat work/security/selected_keymint_service.txt
+
+          echo
+          echo "Selected GateKeeper:"
+          cat work/security/selected_gatekeeper_service.txt
+
+          echo
+          echo "Selected TEE supplicant:"
+          cat work/security/selected_tee_supplicant.txt
 
       # ============================================================
       # 21. LOCATE SECURITY INIT DEFINITIONS
@@ -484,46 +634,91 @@ jobs:
               -o -name '*gatekeeper*.rc' \
               -o -name 'tee-supplicant.rc' \
               -o -name '*keymint*.xml' \
+              -o -name '*gatekeeper*.xml' \
             \) \
             -print \
             | sort \
             > work/security/security_init_files.txt
 
+          echo "Security init/VINTF files:"
           cat work/security/security_init_files.txt
 
       # ============================================================
-      # 22. BUILD ELF DEPENDENCY CLOSURE
+      # 22. ANALYSE STOCK SECURITY ELFs
       # ============================================================
-      - name: Build security ELF dependency closure
+      - name: Analyse stock security ELFs
         run: |
           set -euo pipefail
 
           STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
-          SECURITY_ROOT="$GITHUB_WORKSPACE/work/security"
 
-          mkdir -p "$SECURITY_ROOT/closure"
+          mkdir -p work/security/elf
 
-          find_elf() {
-            local name="$1"
+          while IFS= read -r elf; do
+            [ -f "$elf" ] || continue
 
-            find "$STOCK_ROOT" \
-              -type f \
-              -name "$name" \
-              | sort \
-              | head -n 1
-          }
+            relative="${elf#"$STOCK_ROOT"/}"
 
-          get_needed() {
-            local elf="$1"
+            safe_name="$(echo "$relative" | tr '/:@' '___')"
+
+            echo
+            echo "============================================================"
+            echo "$relative"
+            echo "============================================================"
+
+            file "$elf" || true
+
+            readelf -h "$elf" \
+              > "work/security/elf/${safe_name}.header.txt" \
+              || true
+
+            readelf -d "$elf" \
+              > "work/security/elf/${safe_name}.dynamic.txt" \
+              || true
 
             readelf -d "$elf" 2>/dev/null \
-              | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p' \
-              | sort -u
-          }
+              | sed -n \
+                's/.*Shared library: \[\(.*\)\].*/\1/p' \
+              | sort -u \
+              > "work/security/elf/${safe_name}.needed.txt" \
+              || true
 
-          roots=(
+          done < <(
+            find "$STOCK_ROOT" \
+              -type f \
+              \( \
+                -name 'android.hardware.security.keymint@1.0-service.mitee' \
+                -o -name 'android.hardware.gatekeeper@1.0-service*' \
+                -o -name 'tee-supplicant' \
+                -o -name 'gatekeeper.mitee.so' \
+                -o -name 'libteecli.so' \
+                -o -name 'libmt_mitee.so' \
+                -o -name 'libtida_mitee@1.2.so' \
+                -o -name 'libmfido_mitee.so' \
+                -o -name 'libmlipay_mitee.so' \
+                -o -name 'vendor.trustonic.tee@1.0.so' \
+                -o -name 'vendor.trustonic.tee@1.1.so' \
+                -o -name 'libteeservice_client.trustonic.so' \
+                -o -name 'libkeymint.so' \
+                -o -name 'libkeymint_support.so' \
+                -o -name 'lib_android_keymaster_keymint_utils.so' \
+                -o -name 'libkeymaster4support.so' \
+                -o -name 'libkeymaster_messages.so' \
+              \) \
+              | sort
+          )
+
+      # ============================================================
+      # 23. VERIFY REQUIRED STOCK SECURITY FILES
+      # ============================================================
+      - name: Verify required stock security files
+        run: |
+          set -euo pipefail
+
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+
+          required_names=(
             android.hardware.security.keymint@1.0-service.mitee
-            android.hardware.gatekeeper@1.0-service.mitee
             tee-supplicant
             gatekeeper.mitee.so
             libteecli.so
@@ -541,94 +736,43 @@ jobs:
             libkeymaster_messages.so
           )
 
-          : > "$SECURITY_ROOT/closure/roots.txt"
-          : > "$SECURITY_ROOT/closure/needed.txt"
+          for name in "${required_names[@]}"; do
 
-          for name in "${roots[@]}"; do
-            path="$(find_elf "$name" || true)"
+            found="$(
+              find "$STOCK_ROOT" \
+                -type f \
+                -name "$name" \
+                | sort \
+                | head -n 1
+            )"
 
-            if [ -n "$path" ]; then
-              echo "$path" | tee -a "$SECURITY_ROOT/closure/roots.txt"
-
+            if [ -z "$found" ]; then
               echo
-              echo "===== $path ====="
-
-              get_needed "$path" \
-                | tee -a "$SECURITY_ROOT/closure/needed.txt"
+              echo "MISSING REQUIRED STOCK FILE:"
+              echo "$name"
+              exit 1
             fi
+
+            echo "FOUND:"
+            echo "$found"
+
           done
 
-          sort -u \
-            "$SECURITY_ROOT/closure/needed.txt" \
-            -o "$SECURITY_ROOT/closure/needed.txt"
+          GATEKEEPER_SERVICE="$(
+            cat work/security/selected_gatekeeper_service.txt
+          )"
 
-          echo
-          echo "Required NEEDED libraries:"
-          cat "$SECURITY_ROOT/closure/needed.txt"
-
-      # ============================================================
-      # 23. VERIFY REQUIRED STOCK SECURITY FILES
-      # ============================================================
-      - name: Verify required stock security files
-        run: |
-          set -euo pipefail
-
-          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
-
-          required_files=(
-            "vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
-            "vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee"
-            "vendor/bin/tee-supplicant"
-
-            "vendor/lib64/hw/gatekeeper.mitee.so"
-
-            "vendor/lib64/libteecli.so"
-            "vendor/lib64/libmt_mitee.so"
-            "vendor/lib64/libtida_mitee@1.2.so"
-            "vendor/lib64/libmfido_mitee.so"
-            "vendor/lib64/libmlipay_mitee.so"
-
-            "vendor/lib64/vendor.trustonic.tee@1.0.so"
-            "vendor/lib64/vendor.trustonic.tee@1.1.so"
-            "vendor/lib64/libteeservice_client.trustonic.so"
-
-            "vendor/lib64/libkeymint.so"
-            "vendor/lib64/libkeymint_support.so"
-            "vendor/lib64/lib_android_keymaster_keymint_utils.so"
-            "vendor/lib64/libkeymaster4support.so"
-            "vendor/lib64/libkeymaster_messages.so"
-          )
-
-          missing=0
-
-          for relative in "${required_files[@]}"; do
-            if [ ! -f "$STOCK_ROOT/$relative" ]; then
-              echo "MISSING: $relative"
-              missing=1
-            else
-              echo "FOUND:  $relative"
-            fi
-          done
-
-          if [ "$missing" -ne 0 ]; then
-            echo
-            echo "Required stock security files are missing."
-            echo "Available matching files:"
-            find "$STOCK_ROOT" \
-              -type f \
-              \( \
-                -name '*mitee*' \
-                -o -name '*keymint*' \
-                -o -name '*gatekeeper*' \
-                -o -name '*trustonic*' \
-                -o -name 'libteecli.so' \
-              \) \
-              | sort
+          if [ ! -f "$GATEKEEPER_SERVICE" ]; then
+            echo "Selected GateKeeper service disappeared."
             exit 1
           fi
 
+          echo
+          echo "Selected GateKeeper service:"
+          echo "$GATEKEEPER_SERVICE"
+
       # ============================================================
-      # 24. COPY STOCK FBE SECURITY COMPONENTS
+      # 24. COPY STOCK SECURITY COMPONENTS
       # ============================================================
       - name: Integrate stock FBE security components
         run: |
@@ -637,80 +781,110 @@ jobs:
           STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
           RECOVERY="$GITHUB_WORKSPACE/recovery/root"
 
-          mkdir -p "$RECOVERY/vendor/bin"
-          mkdir -p "$RECOVERY/vendor/bin/hw"
-          mkdir -p "$RECOVERY/vendor/lib64"
-          mkdir -p "$RECOVERY/vendor/lib64/hw"
-          mkdir -p "$RECOVERY/vendor/etc/init"
-          mkdir -p "$RECOVERY/vendor/etc/vintf"
+          mkdir -p \
+            "$RECOVERY/vendor/bin" \
+            "$RECOVERY/vendor/bin/hw" \
+            "$RECOVERY/vendor/lib64" \
+            "$RECOVERY/vendor/lib64/hw" \
+            "$RECOVERY/vendor/etc/init" \
+            "$RECOVERY/vendor/etc/vintf"
 
-          copy_required() {
-            local relative="$1"
+          copy_vendor_file() {
+            local name="$1"
 
-            if [ ! -f "$STOCK/$relative" ]; then
-              echo "Missing stock file: $relative"
+            local found="$(
+              find "$STOCK/vendor" \
+                -type f \
+                -name "$name" \
+                | sort \
+                | head -n 1
+            )"
+
+            if [ -z "$found" ]; then
+              echo "Missing vendor security file: $name"
               exit 1
             fi
 
-            mkdir -p "$RECOVERY/$(dirname "$relative")"
-            cp -f "$STOCK/$relative" "$RECOVERY/$relative"
+            local relative="${found#"$STOCK"/}"
 
-            echo "Installed: $relative"
+            mkdir -p \
+              "$RECOVERY/$(dirname "$relative")"
+
+            cp -f \
+              "$found" \
+              "$RECOVERY/$relative"
+
+            echo "Installed:"
+            echo "  $relative"
           }
 
-          copy_required \
-            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+          copy_vendor_file \
+            android.hardware.security.keymint@1.0-service.mitee
 
-          copy_required \
-            vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
+          copy_vendor_file \
+            tee-supplicant
 
-          copy_required \
-            vendor/bin/tee-supplicant
+          copy_vendor_file \
+            gatekeeper.mitee.so
 
-          copy_required \
-            vendor/lib64/hw/gatekeeper.mitee.so
+          copy_vendor_file \
+            libteecli.so
 
-          copy_required \
-            vendor/lib64/libteecli.so
+          copy_vendor_file \
+            libmt_mitee.so
 
-          copy_required \
-            vendor/lib64/libmt_mitee.so
+          copy_vendor_file \
+            libtida_mitee@1.2.so
 
-          copy_required \
-            vendor/lib64/libtida_mitee@1.2.so
+          copy_vendor_file \
+            libmfido_mitee.so
 
-          copy_required \
-            vendor/lib64/libmfido_mitee.so
+          copy_vendor_file \
+            libmlipay_mitee.so
 
-          copy_required \
-            vendor/lib64/libmlipay_mitee.so
+          copy_vendor_file \
+            vendor.trustonic.tee@1.0.so
 
-          copy_required \
-            vendor/lib64/vendor.trustonic.tee@1.0.so
+          copy_vendor_file \
+            vendor.trustonic.tee@1.1.so
 
-          copy_required \
-            vendor/lib64/vendor.trustonic.tee@1.1.so
+          copy_vendor_file \
+            libteeservice_client.trustonic.so
 
-          copy_required \
-            vendor/lib64/libteeservice_client.trustonic.so
+          copy_vendor_file \
+            libkeymint.so
 
-          copy_required \
-            vendor/lib64/libkeymint.so
+          copy_vendor_file \
+            libkeymint_support.so
 
-          copy_required \
-            vendor/lib64/libkeymint_support.so
+          copy_vendor_file \
+            lib_android_keymaster_keymint_utils.so
 
-          copy_required \
-            vendor/lib64/lib_android_keymaster_keymint_utils.so
+          copy_vendor_file \
+            libkeymaster4support.so
 
-          copy_required \
-            vendor/lib64/libkeymaster4support.so
+          copy_vendor_file \
+            libkeymaster_messages.so
 
-          copy_required \
-            vendor/lib64/libkeymaster_messages.so
+          GATEKEEPER_SERVICE="$(
+            cat work/security/selected_gatekeeper_service.txt
+          )"
+
+          relative="${GATEKEEPER_SERVICE#"$STOCK"/}"
+
+          mkdir -p \
+            "$RECOVERY/$(dirname "$relative")"
+
+          cp -f \
+            "$GATEKEEPER_SERVICE" \
+            "$RECOVERY/$relative"
+
+          echo
+          echo "Installed selected GateKeeper:"
+          echo "$relative"
 
       # ============================================================
-      # 25. COPY STOCK SECURITY INIT / VINTF FILES
+      # 25. COPY STOCK SECURITY INIT / VINTF
       # ============================================================
       - name: Integrate stock security init and VINTF
         run: |
@@ -719,112 +893,139 @@ jobs:
           STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
           RECOVERY="$GITHUB_WORKSPACE/recovery/root"
 
-          mkdir -p "$RECOVERY/vendor/etc/init"
-          mkdir -p "$RECOVERY/vendor/etc/vintf"
+          mkdir -p \
+            "$RECOVERY/vendor/etc/init" \
+            "$RECOVERY/vendor/etc/vintf"
 
-          copy_if_found() {
-            local filename="$1"
+          copy_init_if_found() {
+            local name="$1"
 
-            local found
-            found="$(find "$STOCK/vendor/etc" \
-              -type f \
-              -name "$filename" \
-              | sort \
-              | head -n 1 || true)"
+            local found="$(
+              find "$STOCK/vendor/etc/init" \
+                -type f \
+                -name "$name" \
+                | sort \
+                | head -n 1 \
+            )"
 
             if [ -n "$found" ]; then
-              cp -f "$found" "$RECOVERY/vendor/etc/$(basename "$(dirname "$found")")/"
-              echo "Copied: $found"
+              cp -f \
+                "$found" \
+                "$RECOVERY/vendor/etc/init/$name"
+
+              echo "Copied init:"
+              echo "$name"
             fi
           }
 
-          # KeyMint
-          for file in \
-            android.hardware.security.keymint-service.mitee.rc \
-            android.hardware.security.keymint@1.0-service.mitee.rc; do
+          copy_vintf_if_found() {
+            local name="$1"
 
-            found="$(find "$STOCK/vendor/etc/init" \
-              -type f \
-              -name "$file" \
-              | head -n 1 || true)"
-
-            if [ -n "$found" ]; then
-              cp -f "$found" "$RECOVERY/vendor/etc/init/$file"
-              echo "Copied KeyMint init: $file"
-            fi
-          done
-
-          # GateKeeper
-          for file in \
-            android.hardware.gatekeeper@1.0-service.mitee.rc \
-            android.hardware.gatekeeper@1.0-service.rc; do
-
-            found="$(find "$STOCK/vendor/etc/init" \
-              -type f \
-              -name "$file" \
-              | head -n 1 || true)"
+            local found="$(
+              find "$STOCK/vendor/etc/vintf" \
+                -type f \
+                -name "$name" \
+                | sort \
+                | head -n 1
+            )"
 
             if [ -n "$found" ]; then
-              cp -f "$found" "$RECOVERY/vendor/etc/init/$file"
-              echo "Copied GateKeeper init: $file"
+              cp -f \
+                "$found" \
+                "$RECOVERY/vendor/etc/vintf/$name"
+
+              echo "Copied VINTF:"
+              echo "$name"
             fi
-          done
+          }
 
-          # TEE
-          found="$(find "$STOCK/vendor/etc/init" \
-            -type f \
-            -name 'tee-supplicant.rc' \
-            | head -n 1 || true)"
+          copy_init_if_found \
+            android.hardware.security.keymint-service.mitee.rc
 
-          if [ -n "$found" ]; then
-            cp -f "$found" \
-              "$RECOVERY/vendor/etc/init/tee-supplicant.rc"
-          fi
+          copy_init_if_found \
+            android.hardware.security.keymint@1.0-service.mitee.rc
 
-          # KeyMint VINTF
-          for file in \
-            android.hardware.security.keymint-service.mitee.xml \
-            android.hardware.security.keymint.xml; do
+          copy_init_if_found \
+            android.hardware.gatekeeper@1.0-service.mitee.rc
 
-            found="$(find "$STOCK/vendor/etc/vintf" \
-              -type f \
-              -name "$file" \
-              | head -n 1 || true)"
+          copy_init_if_found \
+            android.hardware.gatekeeper@1.0-service.rc
 
-            if [ -n "$found" ]; then
-              cp -f "$found" \
-                "$RECOVERY/vendor/etc/vintf/$file"
-              echo "Copied VINTF: $file"
-            fi
-          done
+          copy_init_if_found \
+            tee-supplicant.rc
+
+          copy_vintf_if_found \
+            android.hardware.security.keymint-service.mitee.xml
+
+          copy_vintf_if_found \
+            android.hardware.security.keymint.xml
 
       # ============================================================
-      # 26. FIX GATEKEEPER SERVICE
+      # 26. FIX GATEKEEPER SERVICE REFERENCES
       # ============================================================
-      - name: Fix GateKeeper service
+      - name: Fix GateKeeper service references
         run: |
           set -euo pipefail
 
-          RC="$GITHUB_WORKSPACE/recovery/root/vendor/etc/init/android.hardware.gatekeeper@1.0-service.rc"
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
 
-          if [ -f "$RC" ]; then
-            sed -i \
-              's#android.hardware.gatekeeper@1.0-service#android.hardware.gatekeeper@1.0-service.mitee#g' \
-              "$RC"
+          GATEKEEPER_SERVICE="$(
+            cat work/security/selected_gatekeeper_service.txt
+          )"
+
+          relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
+
+          actual_name="$(basename "$relative")"
+
+          echo "Actual stock GateKeeper executable:"
+          echo "$actual_name"
+
+          if [ "$actual_name" = \
+            "android.hardware.gatekeeper@1.0-service.mitee" ]; then
+
+            OLD='android.hardware.gatekeeper@1.0-service'
+            NEW='android.hardware.gatekeeper@1.0-service.mitee'
+
+            while IFS= read -r rc; do
+              [ -f "$rc" ] || continue
+
+              sed -i \
+                "s#${OLD}#${NEW}#g" \
+                "$rc"
+
+            done < <(
+              find "$RECOVERY/vendor/etc/init" \
+                -type f \
+                -name '*gatekeeper*.rc' \
+                | sort
+            )
+
+          else
+
+            while IFS= read -r rc; do
+              [ -f "$rc" ] || continue
+
+              sed -i \
+                -E \
+                "s#android\.hardware\.gatekeeper@1\.0-service(\.mitee)?#${actual_name}#g" \
+                "$rc"
+
+            done < <(
+              find "$RECOVERY/vendor/etc/init" \
+                -type f \
+                -name '*gatekeeper*.rc' \
+                | sort
+            )
+
           fi
 
-          MITEERC="$GITHUB_WORKSPACE/recovery/root/vendor/etc/init/android.hardware.gatekeeper@1.0-service.mitee.rc"
+          echo
+          echo "Final GateKeeper init references:"
 
-          if [ -f "$MITEERC" ]; then
-            sed -i \
-              's#android.hardware.gatekeeper@1.0-service[^[:space:]]*#android.hardware.gatekeeper@1.0-service.mitee#g' \
-              "$MITEERC"
-          fi
-
-          echo "GateKeeper init files:"
-          grep -Rni \
-            "gatekeeper" \
-            "$GITHUB_WORKSPACE/recovery/root/vendor/etc/init" \
+          grep -RniE \
+            'gatekeeper|android\.hardware\.gatekeeper' \
+            "$RECOVERY/vendor/etc/init" \
+            2>/dev/null \
             || true
 
       # ============================================================
@@ -837,11 +1038,14 @@ jobs:
           FSTAB="$GITHUB_WORKSPACE/recovery/root/etc/recovery.fstab"
 
           if [ ! -f "$FSTAB" ]; then
-            echo "recovery.fstab not found: $FSTAB"
+            echo "recovery.fstab not found:"
+            echo "$FSTAB"
             exit 1
           fi
 
-          cp "$FSTAB" "$FSTAB.before-fbe"
+          cp \
+            "$FSTAB" \
+            "$FSTAB.before-fbe"
 
           python3 - "$FSTAB" <<'PY'
           import sys
@@ -866,18 +1070,23 @@ jobs:
 
           output.append(
               "/metadata ext4 /dev/block/by-name/metadata "
-              "noatime,nosuid,nodev,discard,wait,check,formattable,first_stage_mount\n"
+              "noatime,nosuid,nodev,discard "
+              "wait,check,formattable,first_stage_mount\n"
           )
 
           output.append(
               "/data f2fs /dev/block/by-name/userdata "
-              "flags=display=data,inlinecrypt,"
-              "fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,"
+              "flags=display=data,"
+              "inlinecrypt,"
+              "fileencryption=aes-256-xts:aes-256-cts:"
+              "v2+inlinecrypt_optimized,"
               "keydirectory=/metadata/vold/metadata_encryption,"
-              "gc_merge,atgc,age_extent_cache,noatime,nosuid,nodev,discard,"
-              "noflush_merge,fsync_mode=nobarrier,reserve_root=134217,"
-              "resgid=1065,wait,check,formattable,quota,latemount,resize,"
-              "reservedsize=128m,checkpoint=fs,fsverity\n"
+              "gc_merge,atgc,age_extent_cache,noatime,"
+              "nosuid,nodev,discard,noflush_merge,"
+              "fsync_mode=nobarrier,reserve_root=134217,"
+              "resgid=1065,wait,check,formattable,quota,"
+              "latemount,resize,reservedsize=128m,"
+              "checkpoint=fs,fsverity\n"
           )
 
           with open(path, "w", encoding="utf-8") as f:
@@ -885,7 +1094,7 @@ jobs:
           PY
 
           echo
-          echo "Updated recovery.fstab:"
+          echo "Final recovery.fstab:"
           cat "$FSTAB"
 
       # ============================================================
@@ -901,156 +1110,231 @@ jobs:
           grep -q '^/data ' "$FSTAB"
 
           grep -q 'inlinecrypt' "$FSTAB"
-          grep -q 'fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized' "$FSTAB"
-          grep -q 'keydirectory=/metadata/vold/metadata_encryption' "$FSTAB"
+
+          grep -q \
+            'fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized' \
+            "$FSTAB"
+
+          grep -q \
+            'keydirectory=/metadata/vold/metadata_encryption' \
+            "$FSTAB"
 
           echo "FBE fstab configuration verified."
 
       # ============================================================
-      # 29. VERIFY SECURITY BINARIES
+      # 29. VERIFY INTEGRATED SECURITY FILES
       # ============================================================
-      - name: Verify integrated security binaries
+      - name: Verify integrated security files
         run: |
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE/recovery/root"
 
-          binaries=(
-            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
-            vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
-            vendor/bin/tee-supplicant
-            vendor/lib64/hw/gatekeeper.mitee.so
-            vendor/lib64/libteecli.so
-            vendor/lib64/libmt_mitee.so
-            vendor/lib64/libtida_mitee@1.2.so
-            vendor/lib64/libmfido_mitee.so
-            vendor/lib64/libmlipay_mitee.so
-            vendor/lib64/vendor.trustonic.tee@1.0.so
-            vendor/lib64/vendor.trustonic.tee@1.1.so
-            vendor/lib64/libteeservice_client.trustonic.so
-            vendor/lib64/libkeymint.so
-            vendor/lib64/libkeymint_support.so
-            vendor/lib64/lib_android_keymaster_keymint_utils.so
-            vendor/lib64/libkeymaster4support.so
-            vendor/lib64/libkeymaster_messages.so
+          test -f \
+            "$ROOT/vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
+
+          test -f \
+            "$ROOT/vendor/bin/tee-supplicant"
+
+          test -f \
+            "$ROOT/vendor/lib64/hw/gatekeeper.mitee.so"
+
+          for name in \
+            libteecli.so \
+            libmt_mitee.so \
+            libtida_mitee@1.2.so \
+            libmfido_mitee.so \
+            libmlipay_mitee.so \
+            vendor.trustonic.tee@1.0.so \
+            vendor.trustonic.tee@1.1.so \
+            libteeservice_client.trustonic.so \
+            libkeymint.so \
+            libkeymint_support.so \
+            lib_android_keymaster_keymint_utils.so \
+            libkeymaster4support.so \
+            libkeymaster_messages.so; do
+
+            if ! find "$ROOT/vendor" \
+              -type f \
+              -name "$name" \
+              | grep -q .; then
+
+              echo "Integrated library missing: $name"
+              exit 1
+            fi
+
+          done
+
+          GATEKEEPER_SERVICE="$(
+            cat work/security/selected_gatekeeper_service.txt
           )
 
-          for relative in "${binaries[@]}"; do
-            path="$ROOT/$relative"
+          relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
 
-            test -f "$path"
+          if [ ! -f "$ROOT/$relative" ]; then
+            echo "Integrated GateKeeper service missing:"
+            echo "$relative"
+            exit 1
+          fi
+
+          echo "All required security components are present."
+
+      # ============================================================
+      # 30. VERIFY SECURITY ELF ARCHITECTURES
+      # ============================================================
+      - name: Verify security ELF architectures
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          while IFS= read -r elf; do
+            [ -f "$elf" ] || continue
 
             echo
             echo "============================================================"
-            echo "$relative"
+            echo "$elf"
             echo "============================================================"
 
-            file "$path"
+            file "$elf"
 
-            readelf -h "$path" >/dev/null
-          done
+            readelf -h "$elf" \
+              | grep -E \
+                'Class:|Machine:' \
+              || true
+
+          done < <(
+            find "$ROOT/vendor" \
+              -type f \
+              \( \
+                -name 'android.hardware.security.keymint@1.0-service.mitee' \
+                -o -name 'android.hardware.gatekeeper@1.0-service*' \
+                -o -name 'tee-supplicant' \
+                -o -name 'gatekeeper.mitee.so' \
+                -o -name 'libteecli.so' \
+                -o -name 'libmt_mitee.so' \
+                -o -name 'libtida_mitee@1.2.so' \
+                -o -name 'libmfido_mitee.so' \
+                -o -name 'libmlipay_mitee.so' \
+                -o -name 'vendor.trustonic.tee@1.0.so' \
+                -o -name 'vendor.trustonic.tee@1.1.so' \
+                -o -name 'libteeservice_client.trustonic.so' \
+                -o -name 'libkeymint.so' \
+                -o -name 'libkeymint_support.so' \
+                -o -name 'lib_android_keymaster_keymint_utils.so' \
+                -o -name 'libkeymaster4support.so' \
+                -o -name 'libkeymaster_messages.so' \
+              \) \
+              | sort
+          )
 
       # ============================================================
-      # 30. VERIFY REQUIRED ELF DEPENDENCIES
+      # 31. VERIFY DIRECT ELF DEPENDENCIES
       # ============================================================
-      - name: Verify integrated ELF dependencies
+      - name: Verify direct ELF dependencies
         run: |
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE/recovery/root"
-
-          roots=(
-            "$ROOT/vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
-            "$ROOT/vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee"
-            "$ROOT/vendor/bin/tee-supplicant"
-            "$ROOT/vendor/lib64/hw/gatekeeper.mitee.so"
-          )
 
           missing=0
 
-          for root in "${roots[@]}"; do
+          while IFS= read -r elf; do
+            [ -f "$elf" ] || continue
+
             echo
-            echo "============================================================"
-            echo "Checking dependencies:"
-            echo "$root"
-            echo "============================================================"
+            echo "Checking:"
+            echo "$elf"
 
             while IFS= read -r lib; do
-              [ -z "$lib" ] && continue
+              [ -n "$lib" ] || continue
 
-              if find "$ROOT/vendor" \
-                -type f \
-                -name "$lib" \
-                | grep -q .; then
+              found=0
 
-                echo "FOUND: $lib"
+              for directory in \
+                "$ROOT/vendor/lib64" \
+                "$ROOT/vendor/lib64/hw" \
+                "$ROOT/vendor/lib" \
+                "$ROOT/vendor/lib/hw" \
+                "$ROOT/system/lib64" \
+                "$ROOT/system/lib" \
+                "$ROOT/system_ext/lib64" \
+                "$ROOT/system_ext/lib" \
+                "$ROOT/product/lib64" \
+                "$ROOT/product/lib"; do
 
-              elif find "$ROOT/system" \
-                -type f \
-                -name "$lib" \
-                | grep -q .; then
+                if [ -f "$directory/$lib" ]; then
+                  echo "  FOUND: $lib"
+                  found=1
+                  break
+                fi
 
-                echo "FOUND system: $lib"
+              done
 
-              elif find "$ROOT/system_ext" \
-                -type f \
-                -name "$lib" \
-                | grep -q .; then
-
-                echo "FOUND system_ext: $lib"
-
-              elif find "$ROOT/apex" \
-                -type f \
-                -name "$lib" \
-                | grep -q .; then
-
-                echo "FOUND apex: $lib"
-
-              else
-                echo "MISSING: $lib"
+              if [ "$found" -eq 0 ]; then
+                echo "  MISSING: $lib"
                 missing=1
               fi
 
             done < <(
-              readelf -d "$root" 2>/dev/null \
-                | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p' \
+              readelf -d "$elf" 2>/dev/null \
+                | sed -n \
+                  's/.*Shared library: \[\(.*\)\].*/\1/p' \
                 | sort -u
             )
-          done
+
+          done < <(
+            find "$ROOT/vendor" \
+              -type f \
+              \( \
+                -name 'android.hardware.security.keymint@1.0-service.mitee' \
+                -o -name 'android.hardware.gatekeeper@1.0-service*' \
+                -o -name 'tee-supplicant' \
+                -o -name 'gatekeeper.mitee.so' \
+              \) \
+              | sort
+          )
 
           if [ "$missing" -ne 0 ]; then
             echo
-            echo "One or more direct ELF dependencies are missing."
+            echo "Missing direct ELF dependencies."
             exit 1
           fi
 
+          echo
+          echo "All direct ELF dependencies resolved."
+
       # ============================================================
-      # 31. VERIFY NO INIT_BOOT WAS ADDED
+      # 32. VERIFY NO INIT_BOOT
       # ============================================================
-      - name: Verify Android 14 Beryl partition handling
+      - name: Verify no init_boot integration
         run: |
           set -euo pipefail
 
-          if find recovery/root -type f \
+          if find recovery/root \
+            -type f \
             \( \
               -name 'init_boot.img' \
               -o -name '*init_boot*' \
             \) \
             | grep -q .; then
 
-            echo "Unexpected init_boot files detected."
-            find recovery/root -type f \
+            echo "Unexpected init_boot integration detected."
+
+            find recovery/root \
+              -type f \
               \( \
                 -name 'init_boot.img' \
                 -o -name '*init_boot*' \
               \)
+
             exit 1
           fi
 
-          echo "No init_boot integration was added."
+          echo "Correct: no init_boot was added."
 
       # ============================================================
-      # 32. VERIFY NO ODM PARTITION WAS ADDED
+      # 33. VERIFY NO SEPARATE ODM PARTITION
       # ============================================================
       - name: Verify Beryl partition layout
         run: |
@@ -1067,17 +1351,45 @@ jobs:
             exit 1
           fi
 
-          echo "No separate ODM partition reference detected."
+          echo "Correct: no separate ODM partition was added."
 
       # ============================================================
-      # 33. SHOW FINAL SECURITY TREE
+      # 34. VERIFY GATEKEEPER FINAL CONFIGURATION
+      # ============================================================
+      - name: Verify GateKeeper final configuration
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          GATEKEEPER_SERVICE="$(
+            cat work/security/selected_gatekeeper_service.txt
+          )
+
+          relative="${GATEKEEPER_SERVICE#"$GITHUB_WORKSPACE/work/rootfs/stock_security"/}"
+
+          test -f "$ROOT/$relative"
+
+          echo "Selected GateKeeper executable:"
+          echo "$relative"
+
+          echo
+          echo "GateKeeper init configuration:"
+          grep -RniE \
+            'service .*gatekeeper|gatekeeper@1\.0-service|gatekeeper\.mitee' \
+            "$ROOT/vendor/etc/init" \
+            2>/dev/null \
+            || true
+
+      # ============================================================
+      # 35. SHOW FINAL SECURITY TREE
       # ============================================================
       - name: Show final security tree
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "FINAL KEYMINT / GATEKEEPER / TEE TREE"
+          echo "FINAL SECURITY TREE"
           echo "============================================================"
 
           find recovery/root/vendor \
@@ -1086,15 +1398,15 @@ jobs:
               -iname '*keymint*' \
               -o -iname '*gatekeeper*' \
               -o -iname '*mitee*' \
-              -iname '*tee*' \
+              -o -iname '*tee*' \
               -o -iname '*trustonic*' \
             \) \
             | sort
 
       # ============================================================
-      # 34. SHOW GIT DIFF
+      # 36. SHOW GIT STATUS
       # ============================================================
-      - name: Show git diff
+      - name: Show git status
         run: |
           set -euo pipefail
 
@@ -1107,52 +1419,58 @@ jobs:
 
           git diff --stat
 
-          echo
-          echo "============================================================"
-          echo "DIFF"
-          echo "============================================================"
+      # ============================================================
+      # 37. STAGE FBE INTEGRATION
+      # ============================================================
+      - name: Stage FBE integration
+        run: |
+          set -euo pipefail
 
-          git diff -- \
+          git add \
             BoardConfig.mk \
             device.mk \
-            recovery.fstab \
             recovery/root
 
+          echo "============================================================"
+          echo "STAGED FILES"
+          echo "============================================================"
+
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "ERROR: No changes were staged."
+            exit 1
+          fi
+
       # ============================================================
-      # 35. COMMIT AND PUSH DIRECTLY TO MAIN
+      # 38. COMMIT TO MAIN
       # ============================================================
       - name: Commit FBE integration to main
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config \
+            user.name \
+            "github-actions[bot]"
 
-          git add \
-            BoardConfig.mk \
-            device.mk \
-            recovery.fstab \
-            recovery/root
-
-          if git diff --cached --quiet; then
-            echo "No changes were produced."
-            exit 1
-          fi
-
-          echo
-          echo "============================================================"
-          echo "STAGED CHANGES"
-          echo "============================================================"
-
-          git status --short
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git commit \
             -m "beryl: integrate stock FBE KeyMint and GateKeeper"
 
+      # ============================================================
+      # 39. PUSH DIRECTLY TO MAIN
+      # ============================================================
+      - name: Push commit to main
+        run: |
+          set -euo pipefail
+
           git push origin HEAD:main
 
       # ============================================================
-      # 36. VERIFY MAIN PUSH
+      # 40. VERIFY MAIN
       # ============================================================
       - name: Verify main branch
         run: |
@@ -1163,13 +1481,16 @@ jobs:
           LOCAL="$(git rev-parse HEAD)"
           REMOTE="$(git rev-parse origin/main)"
 
-          echo "Local : $LOCAL"
-          echo "Remote: $REMOTE"
+          echo "Local commit : $LOCAL"
+          echo "Remote main  : $REMOTE"
 
           if [ "$LOCAL" != "$REMOTE" ]; then
-            echo "main was not updated to the workflow commit."
+            echo "ERROR: remote main does not contain the workflow commit."
             exit 1
           fi
 
           echo
-          echo "FBE integration successfully committed and pushed to main."
+          echo "============================================================"
+          echo "SUCCESS"
+          echo "============================================================"
+          echo "FBE integration was committed and pushed directly to main."
