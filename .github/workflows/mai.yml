@@ -12,18 +12,24 @@ jobs:
 
     steps:
 
+      # ============================================================
       # 1. CHECKOUT MAIN
+      # ============================================================
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
+      # ============================================================
       # 2. INSTALL TOOLS
+      # ============================================================
       - name: Install tools
         run: |
           set -euo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             cpio \
             liblzma-dev \
@@ -40,9 +46,12 @@ jobs:
 
           python3 -m pip install --upgrade pip
           python3 -m pip install android-payload-dumper==2.3.0
+
           payload-dumper --version
 
+      # ============================================================
       # 3. CREATE WORKSPACE
+      # ============================================================
       - name: Create workspace
         run: |
           set -euo pipefail
@@ -59,7 +68,9 @@ jobs:
             work/unpacked \
             work/security
 
+      # ============================================================
       # 4. STOCK ROM VARIABLES
+      # ============================================================
       - name: Set ROM variables
         run: |
           cat > "$GITHUB_ENV" <<'EOF'
@@ -68,7 +79,9 @@ jobs:
           ROM_URL=https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
           EOF
 
+      # ============================================================
       # 5. CDN BENCHMARK
+      # ============================================================
       - name: CDN benchmark
         run: |
           set -euo pipefail
@@ -81,7 +94,9 @@ jobs:
             --output /dev/null \
             "$ROM_URL" || true
 
+      # ============================================================
       # 6. DOWNLOAD STOCK ROM
+      # ============================================================
       - name: Download stock ROM
         run: |
           set -euo pipefail
@@ -96,7 +111,9 @@ jobs:
             --out="$ROM_FILENAME" \
             "$ROM_URL"
 
+      # ============================================================
       # 7. VERIFY ROM
+      # ============================================================
       - name: Verify ROM
         run: |
           set -euo pipefail
@@ -111,7 +128,9 @@ jobs:
           echo "ROM verified:"
           ls -lh "work/rom/$ROM_FILENAME"
 
+      # ============================================================
       # 8. EXTRACT COMPLETE ROM ZIP
+      # ============================================================
       - name: Extract complete ROM ZIP
         run: |
           set -euo pipefail
@@ -133,7 +152,9 @@ jobs:
           echo "ROM contents:"
           cat work/rom_file_list.txt
 
+      # ============================================================
       # 9. FIND PAYLOAD
+      # ============================================================
       - name: Find payload
         run: |
           set -euo pipefail
@@ -158,7 +179,9 @@ jobs:
 
           ls -lh work/payload/payload.bin
 
+      # ============================================================
       # 10. LIST PAYLOAD
+      # ============================================================
       - name: List payload
         run: |
           set -euo pipefail
@@ -167,7 +190,9 @@ jobs:
             "$PAYLOAD_PATH" \
             --list
 
+      # ============================================================
       # 11. EXTRACT EXACT STOCK PARTITIONS
+      # ============================================================
       - name: Extract exact stock partitions
         run: |
           set -euo pipefail
@@ -197,7 +222,9 @@ jobs:
             -printf '%f\n' \
             | sort
 
+      # ============================================================
       # 12. VERIFY EXTRACTED PARTITIONS
+      # ============================================================
       - name: Verify extracted partitions
         run: |
           set -euo pipefail
@@ -233,7 +260,9 @@ jobs:
 
           echo "All required partitions extracted successfully."
 
+      # ============================================================
       # 13. IDENTIFY PARTITION FILESYSTEMS
+      # ============================================================
       - name: Identify partition filesystems
         run: |
           set -euo pipefail
@@ -243,10 +272,13 @@ jobs:
             echo "============================================================"
             echo "$image"
             echo "============================================================"
+
             file "$image" || true
           done
 
+      # ============================================================
       # 14. EXTRACT EROFS PARTITIONS
+      # ============================================================
       - name: Extract EROFS partitions
         run: |
           set -euo pipefail
@@ -281,7 +313,9 @@ jobs:
           extract_erofs system_ext
           extract_erofs product
 
+      # ============================================================
       # 15. INSTALL AOSP UNPACK_BOOTIMG
+      # ============================================================
       - name: Install AOSP unpack_bootimg.py
         run: |
           set -euo pipefail
@@ -294,7 +328,9 @@ jobs:
           chmod +x \
             work/mkbootimg/unpack_bootimg.py
 
+      # ============================================================
       # 16. UNPACK BOOT
+      # ============================================================
       - name: Unpack boot
         run: |
           set -euo pipefail
@@ -309,7 +345,9 @@ jobs:
             --out \
             work/unpacked/boot
 
+      # ============================================================
       # 17. UNPACK VENDOR_BOOT
+      # ============================================================
       - name: Unpack vendor_boot
         run: |
           set -euo pipefail
@@ -324,7 +362,9 @@ jobs:
             --out \
             work/unpacked/vendor_boot
 
+      # ============================================================
       # 18. EXTRACT VENDOR RAMDISK FRAGMENTS
+      # ============================================================
       - name: Extract vendor ramdisk fragments
         run: |
           set -euo pipefail
@@ -363,7 +403,9 @@ jobs:
               | sort
           )
 
+      # ============================================================
       # 19. BUILD COMPLETE STOCK SECURITY SEARCH TREE
+      # ============================================================
       - name: Build complete stock security search tree
         run: |
           set -euo pipefail
@@ -418,7 +460,9 @@ jobs:
           wc -l \
             work/security/complete_stock_security_tree.txt
 
+      # ============================================================
       # 20. LOCATE KEYMINT / GATEKEEPER / TEE ROOTS
+      # ============================================================
       - name: Locate KeyMint GateKeeper TEE roots
         run: |
           set -euo pipefail
@@ -571,7 +615,9 @@ jobs:
           echo "Selected TEE supplicant:"
           cat work/security/selected_tee_supplicant.txt
 
+      # ============================================================
       # 21. LOCATE SECURITY INIT DEFINITIONS
+      # ============================================================
       - name: Locate security init definitions
         run: |
           set -euo pipefail
@@ -592,7 +638,9 @@ jobs:
           echo "Security init/VINTF files:"
           cat work/security/security_init_files.txt
 
+      # ============================================================
       # 22. ANALYSE STOCK SECURITY ELFs
+      # ============================================================
       - name: Analyse stock security ELFs
         run: |
           set -euo pipefail
@@ -654,7 +702,9 @@ jobs:
               | sort
           )
 
+      # ============================================================
       # 23. VERIFY REQUIRED STOCK SECURITY FILES
+      # ============================================================
       - name: Verify required stock security files
         run: |
           set -euo pipefail
@@ -702,7 +752,7 @@ jobs:
               echo "MISSING REQUIRED STOCK FILE:"
               echo "$name"
               echo
-              echo "Searching all related stock security files:"
+              echo "Searching related stock security files:"
 
               find "$STOCK_ROOT" \
                 -type f \
@@ -728,10 +778,8 @@ jobs:
           echo "VERIFY SELECTED GATEKEEPER"
           echo "============================================================"
 
-          if [ ! -f work/security/selected_gatekeeper_service.txt ]; then
-            echo "selected_gatekeeper_service.txt is missing."
-            exit 1
-          fi
+          test -f \
+            work/security/selected_gatekeeper_service.txt
 
           GATEKEEPER_SERVICE="$(cat work/security/selected_gatekeeper_service.txt)"
 
@@ -754,7 +802,9 @@ jobs:
           echo "ALL REQUIRED STOCK SECURITY FILES VERIFIED"
           echo "============================================================"
 
+      # ============================================================
       # 24. COPY STOCK SECURITY COMPONENTS
+      # ============================================================
       - name: Integrate stock FBE security components
         run: |
           set -euo pipefail
@@ -787,19 +837,6 @@ jobs:
               echo
               echo "Missing stock security file:"
               echo "$name"
-              echo
-              echo "Related stock security files:"
-
-              find "$STOCK" \
-                -type f \
-                \( \
-                  -iname "*trustonic*" \
-                  -o -iname "*tee*" \
-                  -o -iname "*mitee*" \
-                \) \
-                | sort \
-                || true
-
               exit 1
             fi
 
@@ -879,21 +916,9 @@ jobs:
           echo "Installed selected GateKeeper:"
           echo "  $relative"
 
-          echo
-          echo "Final integrated security files:"
-
-          find "$RECOVERY" \
-            -type f \
-            \( \
-              -name '*keymint*' \
-              -o -name '*gatekeeper*' \
-              -o -name '*mitee*' \
-              -o -name '*trustonic*' \
-              -o -name '*tee*' \
-            \) \
-            | sort
-
+      # ============================================================
       # 25. COPY STOCK SECURITY INIT / VINTF
+      # ============================================================
       - name: Integrate stock security init and VINTF
         run: |
           set -euo pipefail
@@ -968,7 +993,9 @@ jobs:
           copy_vintf_if_found \
             android.hardware.security.keymint.xml
 
+      # ============================================================
       # 26. FIX GATEKEEPER SERVICE REFERENCES
+      # ============================================================
       - name: Fix GateKeeper service references
         run: |
           set -euo pipefail
@@ -1032,12 +1059,17 @@ jobs:
             2>/dev/null \
             || true
 
+      # ============================================================
       # 27. APPLY STOCK FBE FSTAB CONFIGURATION
+      #
+      # IMPORTANT:
+      # Beryl tree stores recovery.fstab at repository root.
+      # ============================================================
       - name: Apply stock FBE fstab configuration
         run: |
           set -euo pipefail
 
-          FSTAB="$GITHUB_WORKSPACE/recovery/root/etc/recovery.fstab"
+          FSTAB="$GITHUB_WORKSPACE/recovery.fstab"
 
           if [ ! -f "$FSTAB" ]; then
             echo "recovery.fstab not found:"
@@ -1099,12 +1131,16 @@ jobs:
           echo "Final recovery.fstab:"
           cat "$FSTAB"
 
+      # ============================================================
       # 28. VERIFY FBE FSTAB
+      # ============================================================
       - name: Verify FBE fstab
         run: |
           set -euo pipefail
 
-          FSTAB="$GITHUB_WORKSPACE/recovery/root/etc/recovery.fstab"
+          FSTAB="$GITHUB_WORKSPACE/recovery.fstab"
+
+          test -f "$FSTAB"
 
           grep -q '^/metadata ' "$FSTAB"
           grep -q '^/data ' "$FSTAB"
@@ -1119,9 +1155,12 @@ jobs:
             'keydirectory=/metadata/vold/metadata_encryption' \
             "$FSTAB"
 
+          echo
           echo "FBE fstab configuration verified."
 
+      # ============================================================
       # 29. VERIFY INTEGRATED SECURITY FILES
+      # ============================================================
       - name: Verify integrated security files
         run: |
           set -euo pipefail
@@ -1183,7 +1222,9 @@ jobs:
           echo
           echo "All required security components are present."
 
+      # ============================================================
       # 30. VERIFY SECURITY ELF ARCHITECTURES
+      # ============================================================
       - name: Verify security ELF architectures
         run: |
           set -euo pipefail
@@ -1230,7 +1271,9 @@ jobs:
               | sort
           )
 
+      # ============================================================
       # 31. VERIFY DIRECT ELF DEPENDENCIES
+      # ============================================================
       - name: Verify direct ELF dependencies
         run: |
           set -euo pipefail
@@ -1308,7 +1351,9 @@ jobs:
           echo
           echo "All direct ELF dependencies resolved."
 
+      # ============================================================
       # 32. VERIFY NO INIT_BOOT
+      # ============================================================
       - name: Verify no init_boot integration
         run: |
           set -euo pipefail
@@ -1335,7 +1380,9 @@ jobs:
 
           echo "Correct: no init_boot was added."
 
+      # ============================================================
       # 33. VERIFY NO SEPARATE ODM PARTITION
+      # ============================================================
       - name: Verify Beryl partition layout
         run: |
           set -euo pipefail
@@ -1343,6 +1390,7 @@ jobs:
           if grep -RniE \
             '/dev/block/by-name/odm([^_a-zA-Z]|$)' \
             recovery/root \
+            recovery.fstab \
             BoardConfig.mk \
             device.mk \
             2>/dev/null; then
@@ -1353,7 +1401,9 @@ jobs:
 
           echo "Correct: no separate ODM partition was added."
 
+      # ============================================================
       # 34. VERIFY GATEKEEPER FINAL CONFIGURATION
+      # ============================================================
       - name: Verify GateKeeper final configuration
         run: |
           set -euo pipefail
@@ -1378,7 +1428,9 @@ jobs:
             2>/dev/null \
             || true
 
+      # ============================================================
       # 35. SHOW FINAL SECURITY TREE
+      # ============================================================
       - name: Show final security tree
         run: |
           set -euo pipefail
@@ -1398,7 +1450,9 @@ jobs:
             \) \
             | sort
 
+      # ============================================================
       # 36. SHOW GIT STATUS
+      # ============================================================
       - name: Show git status
         run: |
           set -euo pipefail
@@ -1412,12 +1466,15 @@ jobs:
 
           git diff --stat
 
+      # ============================================================
       # 37. STAGE FBE INTEGRATION
+      # ============================================================
       - name: Stage FBE integration
         run: |
           set -euo pipefail
 
           git add \
+            recovery.fstab \
             BoardConfig.mk \
             device.mk \
             recovery/root
@@ -1433,7 +1490,9 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
       # 38. COMMIT TO MAIN
+      # ============================================================
       - name: Commit FBE integration to main
         run: |
           set -euo pipefail
@@ -1449,14 +1508,18 @@ jobs:
           git commit \
             -m "beryl: integrate stock FBE KeyMint and GateKeeper"
 
+      # ============================================================
       # 39. PUSH DIRECTLY TO MAIN
+      # ============================================================
       - name: Push commit to main
         run: |
           set -euo pipefail
 
           git push origin HEAD:main
 
+      # ============================================================
       # 40. VERIFY MAIN
+      # ============================================================
       - name: Verify main branch
         run: |
           set -euo pipefail
