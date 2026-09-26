@@ -25,8 +25,6 @@
 /vbmeta emmc /dev/block/by-name/vbmeta flags=display=vbmeta
 /dtbo emmc /dev/block/by-name/dtbo flags=display=dtbo
 /misc emmc /dev/block/by-name/misc flags=display=misc
-/metadata ext4 /dev/block/by-name/metadata flags=display=metadata
-/data f2fs /dev/block/by-name/userdata flags=display=data
 /persist ext4 /dev/block/by-name/persist flags=display=persist
 /nvdata ext4 /dev/block/by-name/nvdata flags=display=nvdata
 /nvcfg ext4 /dev/block/by-name/nvcfg flags=display=nvcfg
@@ -35,3 +33,5 @@
 
 # Removable storage
 auto vfat /devices/platform/soc/mt_usb* flags=display=USB-OTG;storage;removable
+/metadata ext4 /dev/block/by-name/metadata noatime,nosuid,nodev,discard wait,check,formattable,first_stage_mount
+/data f2fs /dev/block/by-name/userdata flags=display=data,inlinecrypt,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,keydirectory=/metadata/vold/metadata_encryption,gc_merge,atgc,age_extent_cache,noatime,nosuid,nodev,discard,noflush_merge,fsync_mode=nobarrier,reserve_root=134217,resgid=1065,wait,check,formattable,quota,latemount,resize,reservedsize=128m,checkpoint=fs,fsverity
