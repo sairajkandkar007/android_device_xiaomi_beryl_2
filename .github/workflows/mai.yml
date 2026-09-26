@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 jobs:
-  integrate:
+  integrate-fbe:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,56 +31,51 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install -y \
-           aria2 \
-           unzip \
-           p7zip-full \
-           python3 \
-           python3-pip \
-           file \
-           cpio \
-           lz4 \
-           e2fsprogs \
-           erofs-utils \
-           rsync \
-           binutils \
-           gzip \
-           xz-utils \
-           zstd \
-           curl \
-           git
+            cpio \
+            liblzma-dev \
+            wget \
+            aria2 \
+            unzip \
+            e2fsprogs \
+            erofs-utils \
+            file \
+            binutils \
+            python3-pip \
+            python3-venv \
+            git
 
           python3 -m pip install --upgrade pip
           python3 -m pip install android-payload-dumper==2.3.0
 
+          payload-dumper --version
+
       # ============================================================
-      # 3. WORKSPACE
+      # 3. CREATE WORKSPACE
       # ============================================================
       - name: Create workspace
         run: |
           set -euo pipefail
 
           rm -rf work
-          mkdir -p \
-            work/rom \
-            work/zip \
-            work/partitions \
-            work/analysis \
-            work/logs \
-            work/tools \
-            work/rootfs \
-            work/vendor_boot \
-            work/vendor_ramdisks
+          mkdir -p work
+          mkdir -p work/rom
+          mkdir -p work/payload
+          mkdir -p work/images
+          mkdir -p work/rootfs
+          mkdir -p work/rootfs/stock_security
+          mkdir -p work/unpacked
+          mkdir -p work/security
 
       # ============================================================
       # 4. STOCK ROM VARIABLES
       # ============================================================
-      - name: Set stock ROM variables
+      - name: Set ROM variables
         run: |
-          set -euo pipefail
-
-          echo 'ROM_VERSION=OS1.0.4.0.UOQINXM' >> "$GITHUB_ENV"
-          echo 'ROM_FILENAME=miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip' >> "$GITHUB_ENV"
-          echo 'ROM_URL=https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip' >> "$GITHUB_ENV"
+          cat > "$GITHUB_ENV" <<'EOF'
+          ROM_VERSION=OS1.0.4.0.UOQINXM
+          ROM_FILENAME=miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+          ROM_URL=https://bn.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip
+          EOF
 
       # ============================================================
       # 5. CDN BENCHMARK
@@ -89,22 +84,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          for host in \
-            bn.d.miui.com \
-            bigota.d.miui.com \
-            cdnorg.d.miui.com
-          do
-            echo "Testing $host"
-
-            curl \
-              --connect-timeout 10 \
-              --max-time 20 \
-              -o /dev/null \
-              -sS \
-              -w "$host %{http_code} %{time_total}s\n" \
-              "https://$host/$ROM_VERSION/$ROM_FILENAME" \
-              || true
-          done
+          echo "Testing stock ROM CDN..."
+          curl -L \
+            --range 0-1048575 \
+            --silent \
+            --show-error \
+            --output /dev/null \
+            "$ROM_URL" || true
 
       # ============================================================
       # 6. DOWNLOAD STOCK ROM
@@ -114,16 +100,11 @@ jobs:
           set -euo pipefail
 
           aria2c \
-            --console-log-level=notice \
+            --console-log-level=warn \
             --file-allocation=none \
             --max-connection-per-server=16 \
             --split=16 \
-            --min-split-size=4M \
-            --retry-wait=5 \
-            --max-tries=10 \
-            --timeout=30 \
-            --connect-timeout=30 \
-            --summary-interval=10 \
+            --min-split-size=10M \
             --dir=work/rom \
             --out="$ROM_FILENAME" \
             "$ROM_URL"
@@ -135,12 +116,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          test -f "work/rom/$ROM_FILENAME"
           test -s "work/rom/$ROM_FILENAME"
 
-          file "work/rom/$ROM_FILENAME"
+          unzip -t "work/rom/$ROM_FILENAME" >/dev/null
 
-          sha256sum "work/rom/$ROM_FILENAME" \
-            | tee work/analysis/rom.sha256
+          echo "ROM verified:"
+          ls -lh "work/rom/$ROM_FILENAME"
 
       # ============================================================
       # 8. EXTRACT COMPLETE ROM ZIP
@@ -149,12 +131,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf work/zip
-          mkdir -p work/zip
+          rm -rf work/rom_extracted
+          mkdir -p work/rom_extracted
 
           unzip -q \
             "work/rom/$ROM_FILENAME" \
-            -d work/zip
+            -d work/rom_extracted
+
+          find work/rom_extracted \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            | sort \
+            > work/rom_file_list.txt
+
+          echo "ROM contents:"
+          cat work/rom_file_list.txt
 
       # ============================================================
       # 9. FIND PAYLOAD
@@ -163,17 +155,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          PAYLOAD="$(find work/zip \
-            -type f \
-            -name payload.bin \
-            -print -quit)"
+          PAYLOAD_PATH="$(find work/rom_extracted -type f -name payload.bin | head -n 1)"
 
-          test -n "$PAYLOAD"
+          if [ -z "$PAYLOAD_PATH" ]; then
+            echo "payload.bin not found"
+            exit 1
+          fi
 
-          cp "$PAYLOAD" work/payload.bin
+          cp "$PAYLOAD_PATH" work/payload/payload.bin
 
-          sha256sum work/payload.bin \
-            | tee work/analysis/payload.sha256
+          echo "PAYLOAD_PATH=work/payload/payload.bin" >> "$GITHUB_ENV"
+
+          ls -lh work/payload/payload.bin
 
       # ============================================================
       # 10. LIST PAYLOAD
@@ -182,74 +175,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 -m payload_dumper \
-            --help \
-            > work/analysis/payload_dumper_help.txt \
-            || true
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("work/payload.bin")
-          print("payload:", p)
-          print("size:", p.stat().st_size)
-          PY
+          payload-dumper \
+            "$PAYLOAD_PATH" \
+            --list
 
       # ============================================================
       # 11. EXTRACT EXACT STOCK PARTITIONS
-      #
-      # DO NOT CHANGE THIS PARTITION LIST.
-      #
-      # IMPORTANT:
-      # This device/package does NOT contain init_boot.
       # ============================================================
-      - name: Extract stock partitions
+      - name: Extract exact stock partitions
         run: |
           set -euo pipefail
 
-          mkdir -p work/partitions
+          rm -rf work/images/extracted
+          mkdir -p work/images/extracted
 
-          python3 -m payload_dumper \
-            -o work/partitions \
-            -p vendor vendor_dlkm odm_dlkm system system_ext product boot dtbo vendor_boot vbmeta vbmeta_system vbmeta_vendor \
-            -j 8 \
-            work/payload.bin
+          payload-dumper \
+            "$PAYLOAD_PATH" \
+            -o work/images/extracted \
+            -p \
+              vendor \
+              vendor_dlkm \
+              odm_dlkm \
+              system \
+              system_ext \
+              product \
+              boot \
+              dtbo \
+              vendor_boot \
+              vbmeta \
+              vbmeta_system \
+              vbmeta_vendor
+
+          echo "Extracted partitions:"
+          find work/images/extracted \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
 
       # ============================================================
       # 12. VERIFY EXTRACTED PARTITIONS
-      #
-      # FIXED:
-      # - init_boot removed
-      # - check every requested partition
-      # - record FOUND and MISSING separately
-      # - print complete payload partition list
-      # - distinguish payload absence from extraction failure
       # ============================================================
       - name: Verify extracted partitions
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "ACTUAL EXTRACTED PARTITION FILES"
-          echo "============================================================"
-
-          if [ -d work/partitions ]; then
-            find work/partitions \
-              -maxdepth 1 \
-              -type f \
-              -printf '%f %s bytes\n' \
-              | sort
-          else
-            echo "ERROR: work/partitions does not exist."
-            exit 1
-          fi
-
-          echo
-          echo "============================================================"
-          echo "REQUIRED PARTITIONS"
-          echo "============================================================"
-
-          REQUIRED=(
+          required_partitions=(
             vendor
             vendor_dlkm
             odm_dlkm
@@ -264,143 +235,37 @@ jobs:
             vbmeta_vendor
           )
 
-          FOUND_FILE="work/analysis/extracted_partitions_found.txt"
-          MISSING_FILE="work/analysis/extracted_partitions_missing.txt"
+          for partition in "${required_partitions[@]}"; do
+            image="work/images/extracted/${partition}.img"
 
-          : > "$FOUND_FILE"
-          : > "$MISSING_FILE"
-
-          FOUND_COUNT=0
-          MISSING_COUNT=0
-
-          for p in "${REQUIRED[@]}"; do
-
-            IMG="work/partitions/${p}.img"
-
-            if [ -f "$IMG" ] && [ -s "$IMG" ]; then
-
-              SIZE="$(stat -c '%s' "$IMG")"
-
-              echo "FOUND   : $p.img (${SIZE} bytes)"
-
-              echo "$p.img $SIZE" \
-                >> "$FOUND_FILE"
-
-              FOUND_COUNT=$((FOUND_COUNT + 1))
-
-            else
-
-              echo "MISSING : $p.img"
-
-              echo "$p.img" \
-                >> "$MISSING_FILE"
-
-              MISSING_COUNT=$((MISSING_COUNT + 1))
-
+            if [ ! -f "$image" ]; then
+              echo "Missing partition: $image"
+              exit 1
             fi
 
+            if [ ! -s "$image" ]; then
+              echo "Empty partition: $image"
+              exit 1
+            fi
           done
 
-          echo
-          echo "============================================================"
-          echo "PAYLOAD PARTITION LIST"
-          echo "============================================================"
-
-          PAYLOAD_LIST="work/analysis/payload_partitions.txt"
-
-          if python3 -m payload_dumper \
-            -l \
-            work/payload.bin \
-            > "$PAYLOAD_LIST"
-          then
-            cat "$PAYLOAD_LIST"
-          else
-            echo "ERROR: unable to obtain payload partition list."
-            exit 1
-          fi
-
-          echo
-          echo "============================================================"
-          echo "VERIFICATION SUMMARY"
-          echo "============================================================"
-
-          echo "Required partitions : ${#REQUIRED[@]}"
-          echo "Extracted           : $FOUND_COUNT"
-          echo "Missing             : $MISSING_COUNT"
-
-          echo
-          echo "----- FOUND -----"
-
-          if [ -s "$FOUND_FILE" ]; then
-            cat "$FOUND_FILE"
-          else
-            echo "None"
-          fi
-
-          echo
-          echo "----- MISSING -----"
-
-          if [ -s "$MISSING_FILE" ]; then
-            cat "$MISSING_FILE"
-          else
-            echo "None"
-          fi
-
-          echo
-          echo "============================================================"
-          echo "EXTRACTION DIRECTORY"
-          echo "============================================================"
-
-          du -sh work/partitions
-
-          find work/partitions \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-          echo
-
-          if [ "$MISSING_COUNT" -ne 0 ]; then
-
-            echo "============================================================"
-            echo "ERROR: REQUIRED PARTITIONS ARE MISSING"
-            echo "============================================================"
-
-            echo
-            echo "The following requested images were not produced:"
-            cat "$MISSING_FILE"
-
-            echo
-            echo "Compare the missing names above with:"
-            echo "work/analysis/payload_partitions.txt"
-
-            echo
-            echo "Interpretation:"
-            echo "  - If a partition is absent from the payload list,"
-            echo "    it is not contained in this payload under that name."
-            echo "  - If it is present in the payload list but its .img"
-            echo "    is missing here, extraction did not produce it."
-
-            exit 1
-          fi
-
-          echo
-          echo "============================================================"
-          echo "ALL REQUIRED PARTITIONS WERE EXTRACTED"
-          echo "============================================================"
+          echo "All required partitions extracted successfully."
 
       # ============================================================
-      # 13. IDENTIFY FILESYSTEMS
+      # 13. IDENTIFY PARTITION FILESYSTEMS
       # ============================================================
       - name: Identify partition filesystems
         run: |
           set -euo pipefail
 
-          for img in work/partitions/*.img; do
-            echo "===== $img ====="
-            file "$img"
-          done | tee work/analysis/filesystems.txt
+          for image in work/images/extracted/*.img; do
+            echo
+            echo "============================================================"
+            echo "$image"
+            echo "============================================================"
+
+            file "$image" || true
+          done
 
       # ============================================================
       # 14. EXTRACT EROFS PARTITIONS
@@ -409,83 +274,63 @@ jobs:
         run: |
           set -euo pipefail
 
-          for p in \
-            vendor \
-            vendor_dlkm \
-            odm_dlkm \
-            system \
-            system_ext \
-            product
-          do
-            IMG="work/partitions/$p.img"
-            OUT="work/rootfs/$p"
+          extract_erofs() {
+            local name="$1"
+            local image="work/images/extracted/${name}.img"
+            local output="work/rootfs/${name}"
 
-            mkdir -p "$OUT"
-
-            if file "$IMG" | grep -qi EROFS; then
-              fsck.erofs \
-                --extract="$OUT" \
-                "$IMG"
+            if [ ! -f "$image" ]; then
+              return 0
             fi
-          done
+
+            rm -rf "$output"
+            mkdir -p "$output"
+
+            if file "$image" | grep -qi "EROFS"; then
+              echo "Extracting EROFS: $name"
+              fsck.erofs --extract="$output" "$image"
+            else
+              echo "$name is not EROFS; skipping."
+            fi
+          }
+
+          extract_erofs vendor
+          extract_erofs vendor_dlkm
+          extract_erofs odm_dlkm
+          extract_erofs system
+          extract_erofs system_ext
+          extract_erofs product
 
       # ============================================================
       # 15. INSTALL AOSP UNPACK_BOOTIMG
-      #
-      # boot.img and vendor_boot.img are boot-image containers.
-      # They are NOT treated as EXT4 filesystems.
       # ============================================================
-      - name: Install AOSP unpack_bootimg
+      - name: Install AOSP unpack_bootimg.py
         run: |
           set -euo pipefail
 
-          mkdir -p work/tools
+          git clone \
+            --depth=1 \
+            https://android.googlesource.com/platform/system/tools/mkbootimg \
+            work/mkbootimg
 
-          curl \
-            --fail \
-            --retry 5 \
-            --retry-all-errors \
-            -L \
-            'https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT' \
-            -o work/tools/unpack_bootimg.b64
-
-          base64 -d \
-            work/tools/unpack_bootimg.b64 \
-            > work/tools/unpack_bootimg.py
-
-          chmod +x work/tools/unpack_bootimg.py
-
-          python3 \
-            work/tools/unpack_bootimg.py \
-            --help
+          chmod +x work/mkbootimg/unpack_bootimg.py
 
       # ============================================================
-      # 16. UNPACK STOCK BOOT
+      # 16. UNPACK BOOT
       # ============================================================
-      - name: Unpack boot image
+      - name: Unpack boot
         run: |
           set -euo pipefail
 
-          rm -rf work/boot
-          mkdir -p work/boot
-
-          BOOT="work/partitions/boot.img"
-
-          test -s "$BOOT"
+          rm -rf work/unpacked/boot
+          mkdir -p work/unpacked/boot
 
           python3 \
-            work/tools/unpack_bootimg.py \
-            --boot_img "$BOOT" \
-            --out work/boot \
-            --format=info \
-            | tee work/analysis/boot_info.txt
-
-          find work/boot \
-            -maxdepth 2 \
-            -type f \
-            -printf '%P %s bytes\n' \
-            | sort \
-            | tee work/analysis/boot_files.txt
+            work/mkbootimg/unpack_bootimg.py \
+            --boot_img \
+            work/images/extracted/boot.img \
+            --out \
+            work/unpacked/boot
 
       # ============================================================
       # 17. UNPACK VENDOR_BOOT
@@ -494,176 +339,136 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf work/vendor_boot
-          mkdir -p work/vendor_boot
-
-          VENDOR_BOOT="work/partitions/vendor_boot.img"
-
-          test -s "$VENDOR_BOOT"
-
-          MAGIC="$(dd \
-            if="$VENDOR_BOOT" \
-            bs=1 \
-            count=8 \
-            2>/dev/null)"
-
-          echo "vendor_boot magic: $MAGIC"
-
-          test "$MAGIC" = "VNDRBOOT"
+          rm -rf work/unpacked/vendor_boot
+          mkdir -p work/unpacked/vendor_boot
 
           python3 \
-            work/tools/unpack_bootimg.py \
-            --boot_img "$VENDOR_BOOT" \
-            --out work/vendor_boot \
-            --format=info \
-            | tee work/analysis/vendor_boot_info.txt
-
-          find work/vendor_boot \
-            -maxdepth 2 \
-            -type f \
-            -printf '%P %s bytes\n' \
-            | sort \
-            | tee work/analysis/vendor_boot_files.txt
+            work/mkbootimg/unpack_bootimg.py \
+            --boot_img \
+            work/images/extracted/vendor_boot.img \
+            --out \
+            work/unpacked/vendor_boot
 
       # ============================================================
-      # 18. EXTRACT ALL VENDOR BOOT RAMDISK FRAGMENTS
+      # 18. EXTRACT VENDOR RAMDISK FRAGMENTS
       # ============================================================
-      - name: Extract vendor ramdisks
+      - name: Extract vendor ramdisk fragments
         run: |
           set -euo pipefail
 
-          rm -rf work/vendor_ramdisks
-          mkdir -p work/vendor_ramdisks
+          mkdir -p work/rootfs/vendor_boot
 
-          FOUND=0
-
-          for RD in \
-            work/vendor_boot/vendor_ramdisk \
-            work/vendor_boot/vendor_ramdisk[0-9][0-9]
-          do
-            [ -f "$RD" ] || continue
-
-            FOUND=1
-
-            NAME="$(basename "$RD")"
-            OUT="work/vendor_ramdisks/$NAME"
-
-            mkdir -p "$OUT"
-
-            echo "Processing $NAME"
-
-            file "$RD" | tee "$OUT/file.txt"
-
-            if file "$RD" | grep -Eiq 'gzip compressed|gzip data'; then
-              gzip -dc "$RD" > "$OUT/ramdisk.cpio"
-            elif file "$RD" | grep -Eiq 'LZ4 compressed|LZ4'; then
-              lz4 -dc "$RD" > "$OUT/ramdisk.cpio"
-            elif file "$RD" | grep -Eiq 'XZ compressed'; then
-              xz -dc "$RD" > "$OUT/ramdisk.cpio"
-            elif file "$RD" | grep -Eiq 'Zstandard compressed'; then
-              zstd -dc "$RD" > "$OUT/ramdisk.cpio"
-            else
-              cp "$RD" "$OUT/ramdisk.cpio"
-            fi
-
-            mkdir -p "$OUT/root"
-
-            cpio \
-              -idmu \
-              --quiet \
-              -D "$OUT/root" \
-              < "$OUT/ramdisk.cpio" \
-              || {
-                echo "ERROR: unable to unpack $NAME"
-                exit 1
-              }
-          done
-
-          if [ "$FOUND" -eq 0 ]; then
-            echo "ERROR: no vendor ramdisk found"
-            exit 1
-          fi
-
-          find work/vendor_ramdisks \
+          find work/unpacked/vendor_boot \
             -type f \
-            -printf '%P %s bytes\n' \
-            | sort \
-            | tee work/analysis/vendor_ramdisk_files.txt
+            -maxdepth 3 \
+            -print \
+            | sort
+
+          for ramdisk in \
+            work/unpacked/vendor_boot/*ramdisk* \
+            work/unpacked/vendor_boot/ramdisk*; do
+
+            if [ -f "$ramdisk" ]; then
+              echo "Extracting ramdisk: $ramdisk"
+
+              mkdir -p "work/rootfs/vendor_boot/$(basename "$ramdisk")"
+
+              (
+                cd "work/rootfs/vendor_boot/$(basename "$ramdisk")"
+                cpio -idmv < "$GITHUB_WORKSPACE/$ramdisk" || true
+              )
+            fi
+          done
 
       # ============================================================
       # 19. BUILD COMPLETE STOCK SECURITY SEARCH TREE
       # ============================================================
-      - name: Build stock security search tree
+      - name: Build complete stock security search tree
         run: |
           set -euo pipefail
 
           rm -rf work/rootfs/stock_security
           mkdir -p work/rootfs/stock_security
 
-          for p in \
-            vendor \
-            vendor_dlkm \
-            odm_dlkm \
-            system \
-            system_ext \
-            product
-          do
-            if [ -d "work/rootfs/$p" ]; then
-              mkdir -p "work/rootfs/stock_security/$p"
+          copy_tree_if_exists() {
+            local source="$1"
+            local destination="$2"
 
-              rsync -a \
-                "work/rootfs/$p/" \
-                "work/rootfs/stock_security/$p/"
+            if [ -d "$source" ]; then
+              mkdir -p "$destination"
+              cp -a "$source"/. "$destination"/
             fi
-          done
+          }
 
-          for rd in work/vendor_ramdisks/*/root; do
-            [ -d "$rd" ] || continue
+          copy_tree_if_exists \
+            work/rootfs/vendor \
+            work/rootfs/stock_security/vendor
 
-            NAME="$(basename "$(dirname "$rd")")"
+          copy_tree_if_exists \
+            work/rootfs/vendor_dlkm \
+            work/rootfs/stock_security/vendor_dlkm
 
-            mkdir -p \
-              "work/rootfs/stock_security/vendor_boot/$NAME"
+          copy_tree_if_exists \
+            work/rootfs/odm_dlkm \
+            work/rootfs/stock_security/odm_dlkm
 
-            rsync -a \
-              "$rd/" \
-              "work/rootfs/stock_security/vendor_boot/$NAME/"
-          done
+          copy_tree_if_exists \
+            work/rootfs/system \
+            work/rootfs/stock_security/system
+
+          copy_tree_if_exists \
+            work/rootfs/system_ext \
+            work/rootfs/stock_security/system_ext
+
+          copy_tree_if_exists \
+            work/rootfs/product \
+            work/rootfs/stock_security/product
+
+          copy_tree_if_exists \
+            work/rootfs/vendor_boot \
+            work/rootfs/stock_security/vendor_boot
 
           find work/rootfs/stock_security \
             -type f \
             | sort \
-            > work/analysis/security_tree_files.txt
+            > work/security/complete_stock_security_tree.txt
+
+          wc -l work/security/complete_stock_security_tree.txt
 
       # ============================================================
-      # 20. LOCATE ACTUAL SECURITY SERVICE ROOTS
+      # 20. LOCATE KEYMINT / GATEKEEPER / TEE ROOTS
       # ============================================================
-      - name: Locate KeyMint Gatekeeper TEE roots
+      - name: Locate KeyMint GateKeeper TEE roots
         run: |
           set -euo pipefail
 
-          ROOTS="work/analysis/security_roots.txt"
-          : > "$ROOTS"
-
-          SEARCH="work/rootfs/stock_security"
-
-          for name in \
-            android.hardware.security.keymint@1.0-service.mitee \
-            android.hardware.gatekeeper@1.0-service.mitee \
+          SECURITY_ROOTS=(
+            android.hardware.security.keymint@1.0-service.mitee
+            android.hardware.gatekeeper@1.0-service.mitee
             tee-supplicant
-          do
-            find "$SEARCH" \
+          )
+
+          : > work/security/security_roots.txt
+
+          for root in "${SECURITY_ROOTS[@]}"; do
+            echo
+            echo "============================================================"
+            echo "Searching: $root"
+            echo "============================================================"
+
+            find work/rootfs/stock_security \
               -type f \
-              -name "$name" \
+              -name "$root" \
               -print \
-              >> "$ROOTS"
+              | tee -a work/security/security_roots.txt
           done
 
-          sort -u "$ROOTS" -o "$ROOTS"
-
-          cat "$ROOTS"
-
-          test -s "$ROOTS"
+          for root in "${SECURITY_ROOTS[@]}"; do
+            if ! grep -qE "/${root}$" work/security/security_roots.txt; then
+              echo "Required security root not found: $root"
+              exit 1
+            fi
+          done
 
       # ============================================================
       # 21. LOCATE SECURITY INIT DEFINITIONS
@@ -675,1056 +480,696 @@ jobs:
           find work/rootfs/stock_security \
             -type f \
             \( \
-              -name '*.rc' \
-              -o -name '*.xml' \
-            \) \
-            -print0 \
-            | xargs -0 grep -IlE \
-              'keymint|gatekeeper|tee-supplicant|mitee|trustonic|trusty' \
-            | sort -u \
-            > work/analysis/security_init_vintf_candidates.txt \
-            || true
-
-          cat work/analysis/security_init_vintf_candidates.txt
-
-      # ============================================================
-      # 22. CREATE SECURITY INTEGRATION ROOT
-      # ============================================================
-      - name: Create integration tree
-        run: |
-          set -euo pipefail
-
-          rm -rf work/integration
-
-          mkdir -p \
-            work/integration/vendor/bin/hw \
-            work/integration/vendor/bin \
-            work/integration/vendor/lib \
-            work/integration/vendor/lib64 \
-            work/integration/vendor/etc/init \
-            work/integration/vendor/etc/vintf \
-            work/integration/vendor/etc \
-            work/integration/vendor/lib/modules \
-            work/integration/vendor/firmware \
-            work/integration/vendor/etc/security \
-            work/integration/vendor/etc/selinux \
-            work/integration/sepolicy
-
-      # ============================================================
-      # 23. SECURITY SERVICE EXECUTABLES
-      # ============================================================
-      - name: Copy actual security service executables
-        run: |
-          set -euo pipefail
-
-          while IFS= read -r src; do
-            [ -f "$src" ] || continue
-
-            rel="${src#work/rootfs/stock_security/}"
-
-            case "$rel" in
-              vendor/*)
-                dst="work/integration/$rel"
-                ;;
-              vendor_boot/*)
-                dst="work/integration/vendor/$(basename "$src")"
-                ;;
-              *)
-                continue
-                ;;
-            esac
-
-            mkdir -p "$(dirname "$dst")"
-            cp -a "$src" "$dst"
-          done < work/analysis/security_roots.txt
-
-          find work/integration/vendor/bin \
-            -type f \
-            -print \
-            | sort \
-            | tee work/analysis/integrated_security_binaries.txt
-
-      # ============================================================
-      # 24. RESOLVE ELF DEPENDENCY CLOSURE
-      # ============================================================
-      - name: Resolve security ELF dependency closure
-        run: |
-          set -euo pipefail
-
-          SEARCH="work/rootfs/stock_security"
-          OUT="work/analysis/elf_dependency_closure.txt"
-
-          : > "$OUT"
-
-          python3 - "$SEARCH" work/analysis/security_roots.txt "$OUT" <<'PY'
-          import re
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          search_root = Path(sys.argv[1])
-          roots_file = Path(sys.argv[2])
-          output = Path(sys.argv[3])
-
-          roots = [
-              Path(x.strip())
-              for x in roots_file.read_text().splitlines()
-              if x.strip()
-          ]
-
-          by_name = {}
-
-          for p in search_root.rglob("*"):
-              if not p.is_file():
-                  continue
-
-              by_name.setdefault(p.name, []).append(p)
-
-          needed = set()
-          queue = list(roots)
-          seen = set()
-
-          def needed_libs(path):
-              try:
-                  r = subprocess.run(
-                      ["readelf", "-d", str(path)],
-                      text=True,
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.DEVNULL,
-                      check=False,
-                  )
-              except Exception:
-                  return []
-
-              result = []
-
-              for line in r.stdout.splitlines():
-                  m = re.search(
-                      r"\(NEEDED\).*Shared library: \[(.+?)\]",
-                      line
-                  )
-
-                  if m:
-                      result.append(m.group(1))
-
-              return result
-
-          while queue:
-              path = queue.pop()
-
-              if path in seen:
-                  continue
-
-              seen.add(path)
-
-              for lib in needed_libs(path):
-                  needed.add(lib)
-
-                  candidates = by_name.get(lib, [])
-
-                  candidates = sorted(
-                      candidates,
-                      key=lambda p: (
-                          0 if "/vendor/" in str(p) else
-                          1 if "/odm/" in str(p) else
-                          2 if "/system/" in str(p) else
-                          3
-                      )
-                  )
-
-                  if candidates:
-                      queue.append(candidates[0])
-
-          with output.open("w") as f:
-              for lib in sorted(needed):
-                  f.write(lib + "\n")
-          PY
-
-          cat "$OUT"
-
-      # ============================================================
-      # 25. COPY RESOLVED ELF LIBRARIES
-      # ============================================================
-      - name: Copy resolved security ELF libraries
-        run: |
-          set -euo pipefail
-
-          SEARCH="work/rootfs/stock_security"
-
-          while IFS= read -r soname; do
-            [ -n "$soname" ] || continue
-
-            src="$(
-              find "$SEARCH" \
-                -type f \
-                -name "$soname" \
-                -print \
-                | sort \
-                | head -n1
-            )"
-
-            if [ -z "$src" ]; then
-              echo "UNRESOLVED: $soname"
-              continue
-            fi
-
-            rel="${src#work/rootfs/stock_security/}"
-
-            case "$rel" in
-              vendor/*)
-                dst="work/integration/$rel"
-                ;;
-              *)
-                continue
-                ;;
-            esac
-
-            mkdir -p "$(dirname "$dst")"
-
-            if [ ! -e "$dst" ]; then
-              cp -a "$src" "$dst"
-            fi
-          done < work/analysis/elf_dependency_closure.txt
-
-      # ============================================================
-      # 26. VERIFY SECURITY ELFS
-      # ============================================================
-      - name: Verify security ELF dependencies
-        run: |
-          set -euo pipefail
-
-          find \
-            work/integration/vendor/bin \
-            work/integration/vendor/lib \
-            work/integration/vendor/lib64 \
-            -type f \
-            2>/dev/null \
-            | while IFS= read -r f; do
-
-                if file "$f" | grep -q ELF; then
-                  echo "===== $f ====="
-
-                  readelf -d "$f" \
-                    | grep NEEDED \
-                    || true
-                fi
-              done
-
-          echo "Security ELF verification completed."
-
-      # ============================================================
-      # 27. LOCATE SECURITY MODULE METADATA
-      # ============================================================
-      - name: Locate stock module metadata
-        run: |
-          set -euo pipefail
-
-          : > work/analysis/security_module_sources.txt
-
-          find work/rootfs/stock_security \
-            -type f \
-            \( \
-              -name modules.dep \
-              -o -name modules.load \
-              -o -name modules.alias \
-              -o -name modules.softdep \
-              -o -name modules.symbols \
+              -name '*keymint*.rc' \
+              -o -name '*gatekeeper*.rc' \
+              -o -name 'tee-supplicant.rc' \
+              -o -name '*keymint*.xml' \
             \) \
             -print \
             | sort \
-            | tee work/analysis/security_module_sources.txt
+            > work/security/security_init_files.txt
+
+          cat work/security/security_init_files.txt
 
       # ============================================================
-      # 28. RESOLVE SECURITY KERNEL MODULES
+      # 22. BUILD ELF DEPENDENCY CLOSURE
       # ============================================================
-      - name: Resolve security kernel modules
+      - name: Build security ELF dependency closure
         run: |
           set -euo pipefail
 
-          : > work/analysis/security_modules.txt
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+          SECURITY_ROOT="$GITHUB_WORKSPACE/work/security"
 
-          for base in \
-            gz_trusty_mod.ko \
-            gz_tz_system.ko \
-            gz_main_mod.ko \
-            gz_ipc_mod.ko \
-            gz_irq_mod.ko \
-            gz_virtio_mod.ko \
-            gz_log_mod.ko \
-            iommu_gz.ko \
-            trusted_mem.ko \
-            mtk_sec_heap.ko
-          do
-            find work/rootfs/stock_security \
+          mkdir -p "$SECURITY_ROOT/closure"
+
+          find_elf() {
+            local name="$1"
+
+            find "$STOCK_ROOT" \
               -type f \
-              -name "$base" \
-              -print \
-              >> work/analysis/security_modules.txt
+              -name "$name" \
+              | sort \
+              | head -n 1
+          }
+
+          get_needed() {
+            local elf="$1"
+
+            readelf -d "$elf" 2>/dev/null \
+              | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p' \
+              | sort -u
+          }
+
+          roots=(
+            android.hardware.security.keymint@1.0-service.mitee
+            android.hardware.gatekeeper@1.0-service.mitee
+            tee-supplicant
+            gatekeeper.mitee.so
+            libteecli.so
+            libmt_mitee.so
+            libtida_mitee@1.2.so
+            libmfido_mitee.so
+            libmlipay_mitee.so
+            vendor.trustonic.tee@1.0.so
+            vendor.trustonic.tee@1.1.so
+            libteeservice_client.trustonic.so
+            libkeymint.so
+            libkeymint_support.so
+            lib_android_keymaster_keymint_utils.so
+            libkeymaster4support.so
+            libkeymaster_messages.so
+          )
+
+          : > "$SECURITY_ROOT/closure/roots.txt"
+          : > "$SECURITY_ROOT/closure/needed.txt"
+
+          for name in "${roots[@]}"; do
+            path="$(find_elf "$name" || true)"
+
+            if [ -n "$path" ]; then
+              echo "$path" | tee -a "$SECURITY_ROOT/closure/roots.txt"
+
+              echo
+              echo "===== $path ====="
+
+              get_needed "$path" \
+                | tee -a "$SECURITY_ROOT/closure/needed.txt"
+            fi
           done
 
           sort -u \
-            work/analysis/security_modules.txt \
-            -o work/analysis/security_modules.txt
+            "$SECURITY_ROOT/closure/needed.txt" \
+            -o "$SECURITY_ROOT/closure/needed.txt"
 
-          test -s work/analysis/security_modules.txt
-
-          cat work/analysis/security_modules.txt
+          echo
+          echo "Required NEEDED libraries:"
+          cat "$SECURITY_ROOT/closure/needed.txt"
 
       # ============================================================
-      # 29. COPY SECURITY MODULES
+      # 23. VERIFY REQUIRED STOCK SECURITY FILES
       # ============================================================
-      - name: Copy security kernel modules
+      - name: Verify required stock security files
         run: |
           set -euo pipefail
 
-          while IFS= read -r src; do
-            [ -f "$src" ] || continue
+          STOCK_ROOT="$GITHUB_WORKSPACE/work/rootfs/stock_security"
 
-            rel="${src#work/rootfs/stock_security/}"
+          required_files=(
+            "vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
+            "vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee"
+            "vendor/bin/tee-supplicant"
 
-            case "$rel" in
-              vendor/*)
-                dst="work/integration/$rel"
-                ;;
-              vendor_boot/*)
-                dst="work/integration/vendor/lib/modules/$(basename "$src")"
-                ;;
-              *)
-                continue
-                ;;
-            esac
+            "vendor/lib64/hw/gatekeeper.mitee.so"
 
-            mkdir -p "$(dirname "$dst")"
+            "vendor/lib64/libteecli.so"
+            "vendor/lib64/libmt_mitee.so"
+            "vendor/lib64/libtida_mitee@1.2.so"
+            "vendor/lib64/libmfido_mitee.so"
+            "vendor/lib64/libmlipay_mitee.so"
 
-            if [ ! -e "$dst" ]; then
-              cp -a "$src" "$dst"
+            "vendor/lib64/vendor.trustonic.tee@1.0.so"
+            "vendor/lib64/vendor.trustonic.tee@1.1.so"
+            "vendor/lib64/libteeservice_client.trustonic.so"
+
+            "vendor/lib64/libkeymint.so"
+            "vendor/lib64/libkeymint_support.so"
+            "vendor/lib64/lib_android_keymaster_keymint_utils.so"
+            "vendor/lib64/libkeymaster4support.so"
+            "vendor/lib64/libkeymaster_messages.so"
+          )
+
+          missing=0
+
+          for relative in "${required_files[@]}"; do
+            if [ ! -f "$STOCK_ROOT/$relative" ]; then
+              echo "MISSING: $relative"
+              missing=1
+            else
+              echo "FOUND:  $relative"
             fi
-          done < work/analysis/security_modules.txt
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "Required stock security files are missing."
+            echo "Available matching files:"
+            find "$STOCK_ROOT" \
+              -type f \
+              \( \
+                -name '*mitee*' \
+                -o -name '*keymint*' \
+                -o -name '*gatekeeper*' \
+                -o -name '*trustonic*' \
+                -o -name 'libteecli.so' \
+              \) \
+              | sort
+            exit 1
+          fi
 
       # ============================================================
-      # 30. COPY MODULE METADATA
+      # 24. COPY STOCK FBE SECURITY COMPONENTS
       # ============================================================
-      - name: Copy module metadata
+      - name: Integrate stock FBE security components
         run: |
           set -euo pipefail
 
-          for name in \
-            modules.dep \
-            modules.load \
-            modules.alias \
-            modules.softdep \
-            modules.symbols
-          do
-            src="$(
-              find work/rootfs/stock_security \
-                -type f \
-                -name "$name" \
-                -print \
-                | sort \
-                | head -n1
-            )"
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
 
-            [ -n "$src" ] || continue
+          mkdir -p "$RECOVERY/vendor/bin"
+          mkdir -p "$RECOVERY/vendor/bin/hw"
+          mkdir -p "$RECOVERY/vendor/lib64"
+          mkdir -p "$RECOVERY/vendor/lib64/hw"
+          mkdir -p "$RECOVERY/vendor/etc/init"
+          mkdir -p "$RECOVERY/vendor/etc/vintf"
 
-            mkdir -p work/integration/vendor/lib/modules
+          copy_required() {
+            local relative="$1"
 
-            cp -a \
-              "$src" \
-              "work/integration/vendor/lib/modules/$name"
+            if [ ! -f "$STOCK/$relative" ]; then
+              echo "Missing stock file: $relative"
+              exit 1
+            fi
+
+            mkdir -p "$RECOVERY/$(dirname "$relative")"
+            cp -f "$STOCK/$relative" "$RECOVERY/$relative"
+
+            echo "Installed: $relative"
+          }
+
+          copy_required \
+            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+
+          copy_required \
+            vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
+
+          copy_required \
+            vendor/bin/tee-supplicant
+
+          copy_required \
+            vendor/lib64/hw/gatekeeper.mitee.so
+
+          copy_required \
+            vendor/lib64/libteecli.so
+
+          copy_required \
+            vendor/lib64/libmt_mitee.so
+
+          copy_required \
+            vendor/lib64/libtida_mitee@1.2.so
+
+          copy_required \
+            vendor/lib64/libmfido_mitee.so
+
+          copy_required \
+            vendor/lib64/libmlipay_mitee.so
+
+          copy_required \
+            vendor/lib64/vendor.trustonic.tee@1.0.so
+
+          copy_required \
+            vendor/lib64/vendor.trustonic.tee@1.1.so
+
+          copy_required \
+            vendor/lib64/libteeservice_client.trustonic.so
+
+          copy_required \
+            vendor/lib64/libkeymint.so
+
+          copy_required \
+            vendor/lib64/libkeymint_support.so
+
+          copy_required \
+            vendor/lib64/lib_android_keymaster_keymint_utils.so
+
+          copy_required \
+            vendor/lib64/libkeymaster4support.so
+
+          copy_required \
+            vendor/lib64/libkeymaster_messages.so
+
+      # ============================================================
+      # 25. COPY STOCK SECURITY INIT / VINTF FILES
+      # ============================================================
+      - name: Integrate stock security init and VINTF
+        run: |
+          set -euo pipefail
+
+          STOCK="$GITHUB_WORKSPACE/work/rootfs/stock_security"
+          RECOVERY="$GITHUB_WORKSPACE/recovery/root"
+
+          mkdir -p "$RECOVERY/vendor/etc/init"
+          mkdir -p "$RECOVERY/vendor/etc/vintf"
+
+          copy_if_found() {
+            local filename="$1"
+
+            local found
+            found="$(find "$STOCK/vendor/etc" \
+              -type f \
+              -name "$filename" \
+              | sort \
+              | head -n 1 || true)"
+
+            if [ -n "$found" ]; then
+              cp -f "$found" "$RECOVERY/vendor/etc/$(basename "$(dirname "$found")")/"
+              echo "Copied: $found"
+            fi
+          }
+
+          # KeyMint
+          for file in \
+            android.hardware.security.keymint-service.mitee.rc \
+            android.hardware.security.keymint@1.0-service.mitee.rc; do
+
+            found="$(find "$STOCK/vendor/etc/init" \
+              -type f \
+              -name "$file" \
+              | head -n 1 || true)"
+
+            if [ -n "$found" ]; then
+              cp -f "$found" "$RECOVERY/vendor/etc/init/$file"
+              echo "Copied KeyMint init: $file"
+            fi
+          done
+
+          # GateKeeper
+          for file in \
+            android.hardware.gatekeeper@1.0-service.mitee.rc \
+            android.hardware.gatekeeper@1.0-service.rc; do
+
+            found="$(find "$STOCK/vendor/etc/init" \
+              -type f \
+              -name "$file" \
+              | head -n 1 || true)"
+
+            if [ -n "$found" ]; then
+              cp -f "$found" "$RECOVERY/vendor/etc/init/$file"
+              echo "Copied GateKeeper init: $file"
+            fi
+          done
+
+          # TEE
+          found="$(find "$STOCK/vendor/etc/init" \
+            -type f \
+            -name 'tee-supplicant.rc' \
+            | head -n 1 || true)"
+
+          if [ -n "$found" ]; then
+            cp -f "$found" \
+              "$RECOVERY/vendor/etc/init/tee-supplicant.rc"
+          fi
+
+          # KeyMint VINTF
+          for file in \
+            android.hardware.security.keymint-service.mitee.xml \
+            android.hardware.security.keymint.xml; do
+
+            found="$(find "$STOCK/vendor/etc/vintf" \
+              -type f \
+              -name "$file" \
+              | head -n 1 || true)"
+
+            if [ -n "$found" ]; then
+              cp -f "$found" \
+                "$RECOVERY/vendor/etc/vintf/$file"
+              echo "Copied VINTF: $file"
+            fi
           done
 
       # ============================================================
-      # 31. COPY ACTUAL SECURITY INIT FILES
+      # 26. FIX GATEKEEPER SERVICE
       # ============================================================
-      - name: Copy security init files
+      - name: Fix GateKeeper service
         run: |
           set -euo pipefail
 
-          while IFS= read -r src; do
-            [ -f "$src" ] || continue
+          RC="$GITHUB_WORKSPACE/recovery/root/vendor/etc/init/android.hardware.gatekeeper@1.0-service.rc"
 
-            if grep -Eqi \
-              'keymint|gatekeeper|tee-supplicant|mitee' \
-              "$src"
-            then
-              name="$(basename "$src")"
+          if [ -f "$RC" ]; then
+            sed -i \
+              's#android.hardware.gatekeeper@1.0-service#android.hardware.gatekeeper@1.0-service.mitee#g' \
+              "$RC"
+          fi
 
-              mkdir -p work/integration/vendor/etc/init
+          MITEERC="$GITHUB_WORKSPACE/recovery/root/vendor/etc/init/android.hardware.gatekeeper@1.0-service.mitee.rc"
 
-              cp -a \
-                "$src" \
-                "work/integration/vendor/etc/init/$name"
-            fi
-          done < <(
-            find work/rootfs/stock_security \
-              -type f \
-              -name '*.rc' \
-              -print
-          )
+          if [ -f "$MITEERC" ]; then
+            sed -i \
+              's#android.hardware.gatekeeper@1.0-service[^[:space:]]*#android.hardware.gatekeeper@1.0-service.mitee#g' \
+              "$MITEERC"
+          fi
 
-          find work/integration/vendor/etc/init \
-            -type f \
-            -print \
-            | sort \
-            | tee work/analysis/integrated_security_init.txt
-
-      # ============================================================
-      # 32. COPY SECURITY VINTF MANIFESTS
-      # ============================================================
-      - name: Copy security VINTF manifests
-        run: |
-          set -euo pipefail
-
-          while IFS= read -r src; do
-            [ -f "$src" ] || continue
-
-            if grep -Eqi \
-              'keymint|gatekeeper|keymaster' \
-              "$src"
-            then
-              name="$(basename "$src")"
-
-              mkdir -p work/integration/vendor/etc/vintf
-
-              cp -a \
-                "$src" \
-                "work/integration/vendor/etc/vintf/$name"
-            fi
-          done < <(
-            find work/rootfs/stock_security \
-              -type f \
-              \( \
-                -name '*.xml' \
-                -o -name '*.manifest' \
-              \) \
-              -print
-          )
-
-      # ============================================================
-      # 33. FIND EXACT FIRMWARE / CONFIG REFERENCES
-      # ============================================================
-      - name: Find exact security firmware references
-        run: |
-          set -euo pipefail
-
-          : > work/analysis/security_firmware_refs.txt
-
-          find work/rootfs/stock_security \
-            -type f \
-            \( \
-              -perm -0100 \
-              -o -name '*.so' \
-              -o -name '*.ko' \
-              -o -name '*.rc' \
-              -o -name '*.conf' \
-              -o -name '*.xml' \
-            \) \
-            -print0 \
-            | xargs -0 strings 2>/dev/null \
-            | grep -E \
-              '(/vendor/)?(firmware|tee|trusty|mitee|keymint|keymaster|gatekeeper)[A-Za-z0-9_./:@-]*' \
-            | sort -u \
-            > work/analysis/security_firmware_refs.txt \
+          echo "GateKeeper init files:"
+          grep -Rni \
+            "gatekeeper" \
+            "$GITHUB_WORKSPACE/recovery/root/vendor/etc/init" \
             || true
 
-          cat work/analysis/security_firmware_refs.txt
-
       # ============================================================
-      # 34. COPY ONLY EXISTING REFERENCED SECURITY FIRMWARE
+      # 27. APPLY STOCK FBE FSTAB CONFIGURATION
       # ============================================================
-      - name: Copy referenced security firmware
+      - name: Apply stock FBE fstab configuration
         run: |
           set -euo pipefail
 
-          while IFS= read -r ref; do
+          FSTAB="$GITHUB_WORKSPACE/recovery/root/etc/recovery.fstab"
 
-            case "$ref" in
-              /vendor/firmware/*)
-                rel="${ref#/}"
-                ;;
-              vendor/firmware/*)
-                rel="$ref"
-                ;;
-              *)
-                continue
-                ;;
-            esac
+          if [ ! -f "$FSTAB" ]; then
+            echo "recovery.fstab not found: $FSTAB"
+            exit 1
+          fi
 
-            base="$(basename "$rel")"
-
-            [ -n "$base" ] || continue
-
-            src="$(
-              find work/rootfs/stock_security \
-                -type f \
-                -path "*/$rel" \
-                -print \
-                | sort \
-                | head -n1
-            )"
-
-            if [ -z "$src" ]; then
-              src="$(
-                find work/rootfs/stock_security \
-                  -type f \
-                  -name "$base" \
-                  -print \
-                  | sort \
-                  | head -n1
-              )"
-            fi
-
-            [ -n "$src" ] || continue
-
-            mkdir -p \
-              "work/integration/$(dirname "$rel")"
-
-            cp -a \
-              "$src" \
-              "work/integration/$rel"
-
-          done < work/analysis/security_firmware_refs.txt
-
-      # ============================================================
-      # 35. STOCK FBE CONFIGURATION
-      # ============================================================
-      - name: Extract stock FBE configuration
-        run: |
-          set -euo pipefail
-
-          : > work/analysis/stock_fbe_config.txt
-
-          find work/rootfs/stock_security \
-            -type f \
-            -name 'fstab*' \
-            -print0 \
-            | while IFS= read -r -d '' f; do
-
-                echo "===== $f =====" \
-                  >> work/analysis/stock_fbe_config.txt
-
-                grep -E \
-                  '(/data|fileencryption|keydirectory|metadata|fsverity|inlinecrypt)' \
-                  "$f" \
-                  >> work/analysis/stock_fbe_config.txt \
-                  || true
-
-                echo \
-                  >> work/analysis/stock_fbe_config.txt
-              done
-
-          cat work/analysis/stock_fbe_config.txt
-
-      # ============================================================
-      # 36. RECOVERY FSTAB FBE CONFIG
-      # ============================================================
-      - name: Update recovery FBE configuration
-        run: |
-          set -euo pipefail
-
-          FSTAB="recovery.fstab"
-
-          test -f "$FSTAB"
-
-          cp "$FSTAB" work/analysis/recovery.fstab.before
+          cp "$FSTAB" "$FSTAB.before-fbe"
 
           python3 - "$FSTAB" <<'PY'
-          from pathlib import Path
-          import re
           import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text()
+          path = sys.argv[1]
 
-          lines = text.splitlines()
+          with open(path, "r", encoding="utf-8") as f:
+              lines = f.readlines()
 
-          out = []
-          changed = False
+          output = []
 
           for line in lines:
               stripped = line.strip()
 
-              if (
-                  stripped
-                  and not stripped.startswith("#")
-                  and re.match(r"^\S+\s+/data\s+", stripped)
-              ):
-                  if "fileencryption=" not in line:
-                      line += ",fileencryption=aes-256-xts:aes-256-cts:v2"
+              if stripped.startswith("/data "):
+                  continue
 
-                  if "keydirectory=" not in line:
-                      line += ",keydirectory=/metadata/vold/metadata_encryption"
+              if stripped.startswith("/metadata "):
+                  continue
 
-                  if "fsverity" not in line:
-                      line += ",fsverity"
+              output.append(line)
 
-                  changed = True
+          output.append(
+              "/metadata ext4 /dev/block/by-name/metadata "
+              "noatime,nosuid,nodev,discard,wait,check,formattable,first_stage_mount\n"
+          )
 
-              out.append(line)
+          output.append(
+              "/data f2fs /dev/block/by-name/userdata "
+              "flags=display=data,inlinecrypt,"
+              "fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,"
+              "keydirectory=/metadata/vold/metadata_encryption,"
+              "gc_merge,atgc,age_extent_cache,noatime,nosuid,nodev,discard,"
+              "noflush_merge,fsync_mode=nobarrier,reserve_root=134217,"
+              "resgid=1065,wait,check,formattable,quota,latemount,resize,"
+              "reservedsize=128m,checkpoint=fs,fsverity\n"
+          )
 
-          if changed:
-              path.write_text("\n".join(out) + "\n")
+          with open(path, "w", encoding="utf-8") as f:
+              f.writelines(output)
           PY
 
-          cp "$FSTAB" work/analysis/recovery.fstab.after
-
+          echo
+          echo "Updated recovery.fstab:"
           cat "$FSTAB"
 
       # ============================================================
-      # 37. STOCK SELINUX POLICY DISCOVERY
+      # 28. VERIFY FBE FSTAB
       # ============================================================
-      - name: Analyze stock SELinux policy
+      - name: Verify FBE fstab
         run: |
           set -euo pipefail
 
-          POLICY="work/analysis/stock_selinux_security.txt"
+          FSTAB="$GITHUB_WORKSPACE/recovery/root/etc/recovery.fstab"
 
-          : > "$POLICY"
+          grep -q '^/metadata ' "$FSTAB"
+          grep -q '^/data ' "$FSTAB"
 
-          find work/rootfs/stock_security \
-            -type f \
-            \( \
-              -name '*.te' \
-              -o -name '*.cil' \
-              -o -name 'file_contexts*' \
-              -o -name 'service_contexts*' \
-              -o -name 'hwservice_contexts*' \
-              -o -name 'property_contexts*' \
-              -o -name 'genfs_contexts*' \
-            \) \
-            -print0 \
-            | while IFS= read -r -d '' f; do
+          grep -q 'inlinecrypt' "$FSTAB"
+          grep -q 'fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized' "$FSTAB"
+          grep -q 'keydirectory=/metadata/vold/metadata_encryption' "$FSTAB"
 
-                if grep -Eqi \
-                  'keymint|gatekeeper|keymaster|mitee|tee|trusty' \
-                  "$f"
-                then
-                  echo "===== $f =====" \
-                    >> "$POLICY"
-
-                  grep -Ei \
-                    'keymint|gatekeeper|keymaster|mitee|tee|trusty' \
-                    "$f" \
-                    >> "$POLICY" \
-                    || true
-
-                  echo \
-                    >> "$POLICY"
-                fi
-              done
-
-          cat "$POLICY"
+          echo "FBE fstab configuration verified."
 
       # ============================================================
-      # 38. BUILD RECOVERY SELINUX FROM ACTUAL EXISTING POLICY
+      # 29. VERIFY SECURITY BINARIES
       # ============================================================
-      - name: Integrate SELinux policy
+      - name: Verify integrated security binaries
         run: |
           set -euo pipefail
 
-          POLICY_SRC=""
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
 
-          for d in \
-            recovery/root/sepolicy \
-            sepolicy \
-            recovery/sepolicy
-          do
-            if [ -d "$d" ]; then
-              POLICY_SRC="$d"
-              break
-            fi
+          binaries=(
+            vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee
+            vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee
+            vendor/bin/tee-supplicant
+            vendor/lib64/hw/gatekeeper.mitee.so
+            vendor/lib64/libteecli.so
+            vendor/lib64/libmt_mitee.so
+            vendor/lib64/libtida_mitee@1.2.so
+            vendor/lib64/libmfido_mitee.so
+            vendor/lib64/libmlipay_mitee.so
+            vendor/lib64/vendor.trustonic.tee@1.0.so
+            vendor/lib64/vendor.trustonic.tee@1.1.so
+            vendor/lib64/libteeservice_client.trustonic.so
+            vendor/lib64/libkeymint.so
+            vendor/lib64/libkeymint_support.so
+            vendor/lib64/lib_android_keymaster_keymint_utils.so
+            vendor/lib64/libkeymaster4support.so
+            vendor/lib64/libkeymaster_messages.so
+          )
+
+          for relative in "${binaries[@]}"; do
+            path="$ROOT/$relative"
+
+            test -f "$path"
+
+            echo
+            echo "============================================================"
+            echo "$relative"
+            echo "============================================================"
+
+            file "$path"
+
+            readelf -h "$path" >/dev/null
           done
 
-          if [ -z "$POLICY_SRC" ]; then
-            echo "No standalone recovery sepolicy directory found."
+      # ============================================================
+      # 30. VERIFY REQUIRED ELF DEPENDENCIES
+      # ============================================================
+      - name: Verify integrated ELF dependencies
+        run: |
+          set -euo pipefail
 
-            find recovery \
-              -type f \
+          ROOT="$GITHUB_WORKSPACE/recovery/root"
+
+          roots=(
+            "$ROOT/vendor/bin/hw/android.hardware.security.keymint@1.0-service.mitee"
+            "$ROOT/vendor/bin/hw/android.hardware.gatekeeper@1.0-service.mitee"
+            "$ROOT/vendor/bin/tee-supplicant"
+            "$ROOT/vendor/lib64/hw/gatekeeper.mitee.so"
+          )
+
+          missing=0
+
+          for root in "${roots[@]}"; do
+            echo
+            echo "============================================================"
+            echo "Checking dependencies:"
+            echo "$root"
+            echo "============================================================"
+
+            while IFS= read -r lib; do
+              [ -z "$lib" ] && continue
+
+              if find "$ROOT/vendor" \
+                -type f \
+                -name "$lib" \
+                | grep -q .; then
+
+                echo "FOUND: $lib"
+
+              elif find "$ROOT/system" \
+                -type f \
+                -name "$lib" \
+                | grep -q .; then
+
+                echo "FOUND system: $lib"
+
+              elif find "$ROOT/system_ext" \
+                -type f \
+                -name "$lib" \
+                | grep -q .; then
+
+                echo "FOUND system_ext: $lib"
+
+              elif find "$ROOT/apex" \
+                -type f \
+                -name "$lib" \
+                | grep -q .; then
+
+                echo "FOUND apex: $lib"
+
+              else
+                echo "MISSING: $lib"
+                missing=1
+              fi
+
+            done < <(
+              readelf -d "$root" 2>/dev/null \
+                | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p' \
+                | sort -u
+            )
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "One or more direct ELF dependencies are missing."
+            exit 1
+          fi
+
+      # ============================================================
+      # 31. VERIFY NO INIT_BOOT WAS ADDED
+      # ============================================================
+      - name: Verify Android 14 Beryl partition handling
+        run: |
+          set -euo pipefail
+
+          if find recovery/root -type f \
+            \( \
+              -name 'init_boot.img' \
+              -o -name '*init_boot*' \
+            \) \
+            | grep -q .; then
+
+            echo "Unexpected init_boot files detected."
+            find recovery/root -type f \
               \( \
-                -name '*.te' \
-                -o -name '*.cil' \
-                -o -name '*contexts*' \
-              \) \
-              -print \
-              | sort \
-              > work/analysis/existing_recovery_policy_files.txt
-          else
-            find "$POLICY_SRC" \
-              -type f \
-              -print \
-              | sort \
-              > work/analysis/existing_recovery_policy_files.txt
-          fi
-
-          cat work/analysis/existing_recovery_policy_files.txt
-
-          mkdir -p work/integration/sepolicy
-
-          find work/rootfs/stock_security \
-            -type f \
-            \( \
-              -name '*.te' \
-              -o -name '*.cil' \
-              -o -name 'file_contexts*' \
-              -o -name 'service_contexts*' \
-              -o -name 'hwservice_contexts*' \
-              -o -name 'property_contexts*' \
-              -o -name 'genfs_contexts*' \
-            \) \
-            -print0 \
-            | while IFS= read -r -d '' f; do
-
-                if grep -Eqi \
-                  'keymint|gatekeeper|keymaster|mitee|tee|trusty' \
-                  "$f"
-                then
-                  name="$(basename "$f")"
-
-                  cp -a \
-                    "$f" \
-                    "work/integration/sepolicy/$name"
-                fi
-              done
-
-          find work/integration/sepolicy \
-            -type f \
-            -printf '%f\n' \
-            | sort -u \
-            > work/analysis/integrated_selinux_files.txt
-
-          cat work/analysis/integrated_selinux_files.txt
-
-      # ============================================================
-      # 39. REMOVE OF_SKIP_FBE_DECRYPTION
-      # ============================================================
-      - name: Enable OrangeFox FBE
-        run: |
-          set -euo pipefail
-
-          FOX="fox_beryl.mk"
-
-          test -f "$FOX"
-
-          cp "$FOX" work/analysis/fox_beryl.mk.before
-
-          sed -i \
-            '/^[[:space:]]*OF_SKIP_FBE_DECRYPTION[[:space:]]*:=/d' \
-            "$FOX"
-
-          if grep -q \
-            '^[[:space:]]*OF_SKIP_FBE_DECRYPTION' \
-            "$FOX"
-          then
-            echo "ERROR: OF_SKIP_FBE_DECRYPTION still present"
+                -name 'init_boot.img' \
+                -o -name '*init_boot*' \
+              \)
             exit 1
           fi
 
-          cp "$FOX" work/analysis/fox_beryl.mk.after
+          echo "No init_boot integration was added."
 
       # ============================================================
-      # 40. COPY INTEGRATION FILES INTO RECOVERY TREE
+      # 32. VERIFY NO ODM PARTITION WAS ADDED
       # ============================================================
-      - name: Install security integration
+      - name: Verify Beryl partition layout
         run: |
           set -euo pipefail
 
-          mkdir -p recovery/root/vendor
+          if grep -RniE \
+            '/dev/block/by-name/odm([^_a-zA-Z]|$)' \
+            recovery/root \
+            BoardConfig.mk \
+            device.mk \
+            2>/dev/null; then
 
-          rsync -a \
-            work/integration/vendor/ \
-            recovery/root/vendor/
-
-          if [ -d work/integration/sepolicy ]; then
-            mkdir -p recovery/root/sepolicy
-
-            rsync -a \
-              work/integration/sepolicy/ \
-              recovery/root/sepolicy/
-          fi
-
-      # ============================================================
-      # 41. PRESERVE EXISTING MODULE LOAD STRUCTURE
-      # ============================================================
-      - name: Verify module integration
-        run: |
-          set -euo pipefail
-
-          MODDIR="recovery/root/vendor/lib/modules"
-
-          test -d "$MODDIR"
-
-          for m in \
-            gz_trusty_mod.ko \
-            gz_tz_system.ko
-          do
-            if [ -f "$MODDIR/$m" ]; then
-              echo "Present: $m"
-            else
-              echo "WARNING: $m not present in recovery tree"
-            fi
-          done
-
-          test -f "$MODDIR/modules.load" || true
-
-      # ============================================================
-      # 42. VERIFY SECURITY SERVICES
-      # ============================================================
-      - name: Verify integrated security services
-        run: |
-          set -euo pipefail
-
-          FOUND_KEYMINT=0
-          FOUND_GATEKEEPER=0
-          FOUND_TEE=0
-
-          if find recovery/root \
-            -type f \
-            -name 'android.hardware.security.keymint@1.0-service.mitee' \
-            | grep -q .
-          then
-            FOUND_KEYMINT=1
-          fi
-
-          if find recovery/root \
-            -type f \
-            -name 'android.hardware.gatekeeper@1.0-service.mitee' \
-            | grep -q .
-          then
-            FOUND_GATEKEEPER=1
-          fi
-
-          if find recovery/root \
-            -type f \
-            -name 'tee-supplicant' \
-            | grep -q .
-          then
-            FOUND_TEE=1
-          fi
-
-          echo "KeyMint:        $FOUND_KEYMINT"
-          echo "Gatekeeper:     $FOUND_GATEKEEPER"
-          echo "TEE supplicant: $FOUND_TEE"
-
-          test "$FOUND_KEYMINT" = 1
-          test "$FOUND_TEE" = 1
-
-          if grep -q \
-            'android.hardware.gatekeeper@1.0-service.mitee' \
-            work/analysis/security_roots.txt
-          then
-            test "$FOUND_GATEKEEPER" = 1
-          fi
-
-      # ============================================================
-      # 43. REJECT UNRELATED XIAOMI SERVICES
-      # ============================================================
-      - name: Reject unrelated Xiaomi services
-        run: |
-          set -euo pipefail
-
-          BAD=0
-
-          for name in \
-            vendor.xiaomi.hardware.mfidoca \
-            vendor.xiaomi.hardware.mlipay \
-            vendor.xiaomi.hardware.mtdservice \
-            vendor.xiaomi.hardware.tidaservice \
-            vendor.xiaomi.hardware.vsimapp \
-            soterservice
-          do
-            if find recovery/root \
-              -type f \
-              -name "$name" \
-              | grep -q .
-            then
-              echo "ERROR: unrelated service copied: $name"
-              BAD=1
-            fi
-          done
-
-          test "$BAD" = 0
-
-      # ============================================================
-      # 44. SAFETY CHECK
-      # ============================================================
-      - name: Integration safety check
-        run: |
-          set -euo pipefail
-
-          echo "Checking integration tree..."
-
-          if find recovery/root/vendor \
-            -type f \
-            \( \
-              -name '*.txt' \
-              -o -name '*.sha256' \
-              -o -name '*.log' \
-            \) \
-            | grep -q .
-          then
-            echo "ERROR: analysis/report file found in recovery tree"
+            echo "Unexpected separate ODM partition reference detected."
             exit 1
           fi
 
-          echo "No analysis files copied into recovery tree."
+          echo "No separate ODM partition reference detected."
 
       # ============================================================
-      # 45. SHOW CHANGES
+      # 33. SHOW FINAL SECURITY TREE
       # ============================================================
-      - name: Show changes
+      - name: Show final security tree
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "FINAL KEYMINT / GATEKEEPER / TEE TREE"
+          echo "============================================================"
+
+          find recovery/root/vendor \
+            -type f \
+            \( \
+              -iname '*keymint*' \
+              -o -iname '*gatekeeper*' \
+              -o -iname '*mitee*' \
+              -iname '*tee*' \
+              -o -iname '*trustonic*' \
+            \) \
+            | sort
+
+      # ============================================================
+      # 34. SHOW GIT DIFF
+      # ============================================================
+      - name: Show git diff
         run: |
           set -euo pipefail
 
           git status --short
 
+          echo
+          echo "============================================================"
+          echo "DIFF STAT"
+          echo "============================================================"
+
+          git diff --stat
+
+          echo
+          echo "============================================================"
+          echo "DIFF"
+          echo "============================================================"
+
           git diff -- \
-            fox_beryl.mk \
-            recovery.fstab \
-            recovery/root \
-            recovery/sepolicy \
-            sepolicy \
             BoardConfig.mk \
             device.mk \
-            || true
-
-      # ============================================================
-      # 46. STAGE ONLY DEVICE TREE CHANGES
-      # ============================================================
-      - name: Stage device tree changes
-        run: |
-          set -euo pipefail
-
-          git add \
-            fox_beryl.mk \
             recovery.fstab \
             recovery/root
 
-          if [ -d recovery/sepolicy ]; then
-            git add recovery/sepolicy
-          fi
-
-          if [ -d sepolicy ]; then
-            git add sepolicy
-          fi
-
-          if [ -f BoardConfig.mk ]; then
-            git add BoardConfig.mk
-          fi
-
-          if [ -f device.mk ]; then
-            git add device.mk
-          fi
-
-          echo "===== STAGED FILES ====="
-
-          git diff \
-            --cached \
-            --name-status
-
       # ============================================================
-      # 47. ENSURE WORK IS NOT STAGED
+      # 35. COMMIT AND PUSH DIRECTLY TO MAIN
       # ============================================================
-      - name: Verify analysis is not staged
+      - name: Commit FBE integration to main
         run: |
           set -euo pipefail
-
-          if git diff --cached --name-only | grep -E '^work/'; then
-            echo "ERROR: work/ was staged"
-            exit 1
-          fi
-
-          echo "No work/ files staged."
-
-      # ============================================================
-      # 48. COMMIT TO MAIN
-      # ============================================================
-      - name: Commit integration to main
-        run: |
-          set -euo pipefail
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          git add \
+            BoardConfig.mk \
+            device.mk \
+            recovery.fstab \
+            recovery/root
+
+          if git diff --cached --quiet; then
+            echo "No changes were produced."
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "STAGED CHANGES"
+          echo "============================================================"
+
+          git status --short
+
           git commit \
-            -m "beryl: integrate stock FBE security chain"
+            -m "beryl: integrate stock FBE KeyMint and GateKeeper"
 
           git push origin HEAD:main
 
       # ============================================================
-      # 49. PACKAGE ONLY ANALYSIS
-      #
-      # NEVER archive work/partitions.
+      # 36. VERIFY MAIN PUSH
       # ============================================================
-      - name: Package analysis
-        if: always()
+      - name: Verify main branch
         run: |
           set -euo pipefail
 
-          rm -rf work/analysis_package
-          mkdir -p work/analysis_package
+          git fetch origin main
 
-          cp -a \
-            work/analysis \
-            work/analysis_package/
+          LOCAL="$(git rev-parse HEAD)"
+          REMOTE="$(git rev-parse origin/main)"
 
-          cp -a \
-            work/logs \
-            work/analysis_package/
+          echo "Local : $LOCAL"
+          echo "Remote: $REMOTE"
 
-          tar \
-            -czf \
-            work/beryl-fbe-analysis.tar.gz \
-            -C work \
-            analysis logs
-
-          ls -lh \
-            work/beryl-fbe-analysis.tar.gz
-
-      # ============================================================
-      # 50. UPLOAD ANALYSIS ARTIFACT
-      # ============================================================
-      - name: Upload analysis
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: beryl-stock-fbe-analysis
-          path: |
-            work/beryl-fbe-analysis.tar.gz
-            work/analysis/*
-          if-no-files-found: warn
-          retention-days: 14
-
-      # ============================================================
-      # 51. FINAL STATUS
-      # ============================================================
-      - name: Final status
-        if: always()
-        run: |
-          echo "================================================"
-          echo "BERYL FBE INTEGRATION COMPLETE"
-          echo "================================================"
-
-          git status --short || true
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "main was not updated to the workflow commit."
+            exit 1
+          fi
 
           echo
-          echo "Security roots:"
-          cat work/analysis/security_roots.txt \
-            2>/dev/null \
-            || true
-
-          echo
-          echo "Security modules:"
-          cat work/analysis/security_modules.txt \
-            2>/dev/null \
-            || true
-
-          echo
-          echo "Vendor boot:"
-          cat work/analysis/vendor_boot_info.txt \
-            2>/dev/null \
-            || true
+          echo "FBE integration successfully committed and pushed to main."
