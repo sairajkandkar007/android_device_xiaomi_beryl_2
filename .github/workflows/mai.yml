@@ -198,6 +198,9 @@ jobs:
       # 11. EXTRACT EXACT STOCK PARTITIONS
       #
       # DO NOT CHANGE THIS PARTITION LIST.
+      #
+      # IMPORTANT:
+      # This device/package does NOT contain init_boot.
       # ============================================================
       - name: Extract stock partitions
         run: |
@@ -215,12 +218,11 @@ jobs:
       # 12. VERIFY EXTRACTED PARTITIONS
       #
       # FIXED:
-      # - Do not fail silently on the first missing file.
-      # - Check every requested partition.
-      # - Record FOUND and MISSING separately.
-      # - Print the complete payload partition list.
-      # - Distinguish missing payload partitions from extraction
-      #   failures.
+      # - init_boot removed
+      # - check every requested partition
+      # - record FOUND and MISSING separately
+      # - print complete payload partition list
+      # - distinguish payload absence from extraction failure
       # ============================================================
       - name: Verify extracted partitions
         run: |
@@ -253,7 +255,6 @@ jobs:
             system
             system_ext
             product
-            init_boot
             boot
             dtbo
             vendor_boot
@@ -428,40 +429,10 @@ jobs:
           done
 
       # ============================================================
-      # 15. EXTRACT EXT4 PARTITIONS
-      # ============================================================
-      - name: Extract EXT4 partitions
-        run: |
-          set -euo pipefail
-
-          for p in \
-            init_boot \
-            boot
-          do
-            IMG="work/partitions/$p.img"
-            OUT="work/rootfs/$p"
-
-            mkdir -p "$OUT"
-
-            if file "$IMG" | grep -qi 'ext4'; then
-              7z x \
-                -so "$IMG" \
-                2>/dev/null \
-                | cpio -idmu \
-                    --quiet \
-                    -D "$OUT" \
-                || true
-            fi
-          done
-
-      # ============================================================
-      # 16. INSTALL AOSP UNPACK_BOOTIMG
+      # 15. INSTALL AOSP UNPACK_BOOTIMG
       #
-      # This fixes:
-      #   unpack_bootimg not available
-      #
-      # We download the actual AOSP Python implementation instead
-      # of assuming an Ubuntu executable exists.
+      # boot.img and vendor_boot.img are boot-image containers.
+      # They are NOT treated as EXT4 filesystems.
       # ============================================================
       - name: Install AOSP unpack_bootimg
         run: |
@@ -486,6 +457,34 @@ jobs:
           python3 \
             work/tools/unpack_bootimg.py \
             --help
+
+      # ============================================================
+      # 16. UNPACK STOCK BOOT
+      # ============================================================
+      - name: Unpack boot image
+        run: |
+          set -euo pipefail
+
+          rm -rf work/boot
+          mkdir -p work/boot
+
+          BOOT="work/partitions/boot.img"
+
+          test -s "$BOOT"
+
+          python3 \
+            work/tools/unpack_bootimg.py \
+            --boot_img "$BOOT" \
+            --out work/boot \
+            --format=info \
+            | tee work/analysis/boot_info.txt
+
+          find work/boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%P %s bytes\n' \
+            | sort \
+            | tee work/analysis/boot_files.txt
 
       # ============================================================
       # 17. UNPACK VENDOR_BOOT
@@ -600,7 +599,6 @@ jobs:
           rm -rf work/rootfs/stock_security
           mkdir -p work/rootfs/stock_security
 
-          # Extracted partition trees
           for p in \
             vendor \
             vendor_dlkm \
@@ -611,19 +609,20 @@ jobs:
           do
             if [ -d "work/rootfs/$p" ]; then
               mkdir -p "work/rootfs/stock_security/$p"
+
               rsync -a \
                 "work/rootfs/$p/" \
                 "work/rootfs/stock_security/$p/"
             fi
           done
 
-          # Vendor boot ramdisks
           for rd in work/vendor_ramdisks/*/root; do
             [ -d "$rd" ] || continue
 
             NAME="$(basename "$(dirname "$rd")")"
 
-            mkdir -p "work/rootfs/stock_security/vendor_boot/$NAME"
+            mkdir -p \
+              "work/rootfs/stock_security/vendor_boot/$NAME"
 
             rsync -a \
               "$rd/" \
@@ -746,9 +745,6 @@ jobs:
 
       # ============================================================
       # 24. RESOLVE ELF DEPENDENCY CLOSURE
-      #
-      # Start ONLY from actual security service executables.
-      # Do not use broad Mitee filename matching.
       # ============================================================
       - name: Resolve security ELF dependency closure
         run: |
@@ -760,7 +756,6 @@ jobs:
           : > "$OUT"
 
           python3 - "$SEARCH" work/analysis/security_roots.txt "$OUT" <<'PY'
-          import os
           import re
           import subprocess
           import sys
@@ -803,7 +798,11 @@ jobs:
               result = []
 
               for line in r.stdout.splitlines():
-                  m = re.search(r"\(NEEDED\).*Shared library: \[(.+?)\]", line)
+                  m = re.search(
+                      r"\(NEEDED\).*Shared library: \[(.+?)\]",
+                      line
+                  )
+
                   if m:
                       result.append(m.group(1))
 
@@ -822,7 +821,6 @@ jobs:
 
                   candidates = by_name.get(lib, [])
 
-                  # Prefer vendor/odm over system/product.
                   candidates = sorted(
                       candidates,
                       key=lambda p: (
@@ -876,8 +874,6 @@ jobs:
                 dst="work/integration/$rel"
                 ;;
               *)
-                # Platform libraries supplied by recovery are not copied
-                # merely because a stock binary references them.
                 continue
                 ;;
             esac
@@ -896,13 +892,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          FAILED=0
-
-          find work/integration/vendor/bin \
-               work/integration/vendor/lib \
-               work/integration/vendor/lib64 \
-               -type f \
-               2>/dev/null \
+          find \
+            work/integration/vendor/bin \
+            work/integration/vendor/lib \
+            work/integration/vendor/lib64 \
+            -type f \
+            2>/dev/null \
             | while IFS= read -r f; do
 
                 if file "$f" | grep -q ELF; then
@@ -940,9 +935,6 @@ jobs:
 
       # ============================================================
       # 28. RESOLVE SECURITY KERNEL MODULES
-      #
-      # Start with the Trusty/security modules actually present in
-      # stock modules.load and then follow modules.dep.
       # ============================================================
       - name: Resolve security kernel modules
         run: |
@@ -978,7 +970,7 @@ jobs:
           cat work/analysis/security_modules.txt
 
       # ============================================================
-      # 29. COPY SECURITY MODULE CLOSURE
+      # 29. COPY SECURITY MODULES
       # ============================================================
       - name: Copy security kernel modules
         run: |
@@ -1034,7 +1026,10 @@ jobs:
             [ -n "$src" ] || continue
 
             mkdir -p work/integration/vendor/lib/modules
-            cp -a "$src" "work/integration/vendor/lib/modules/$name"
+
+            cp -a \
+              "$src" \
+              "work/integration/vendor/lib/modules/$name"
           done
 
       # ============================================================
@@ -1073,7 +1068,7 @@ jobs:
             | tee work/analysis/integrated_security_init.txt
 
       # ============================================================
-      # 32. COPY ACTUAL VINTF SECURITY MANIFESTS
+      # 32. COPY SECURITY VINTF MANIFESTS
       # ============================================================
       - name: Copy security VINTF manifests
         run: |
@@ -1221,9 +1216,6 @@ jobs:
 
       # ============================================================
       # 36. RECOVERY FSTAB FBE CONFIG
-      #
-      # Preserve existing recovery.fstab and add only the required
-      # FBE-related mount flags if /data is already present.
       # ============================================================
       - name: Update recovery FBE configuration
         run: |
@@ -1279,9 +1271,6 @@ jobs:
 
       # ============================================================
       # 37. STOCK SELINUX POLICY DISCOVERY
-      #
-      # Do not invent a "generic perfect" policy.
-      # Collect the actual stock policy references first.
       # ============================================================
       - name: Analyze stock SELinux policy
         run: |
@@ -1327,9 +1316,6 @@ jobs:
 
       # ============================================================
       # 38. BUILD RECOVERY SELINUX FROM ACTUAL EXISTING POLICY
-      #
-      # Only copy stock policy fragments that actually exist.
-      # Never add permissive/setenforce rules.
       # ============================================================
       - name: Integrate SELinux policy
         run: |
@@ -1350,7 +1336,6 @@ jobs:
 
           if [ -z "$POLICY_SRC" ]; then
             echo "No standalone recovery sepolicy directory found."
-            echo "Searching existing recovery policy files..."
 
             find recovery \
               -type f \
@@ -1374,8 +1359,6 @@ jobs:
 
           mkdir -p work/integration/sepolicy
 
-          # Copy only stock policy source files that contain actual
-          # security-chain references.
           find work/rootfs/stock_security \
             -type f \
             \( \
@@ -1402,7 +1385,6 @@ jobs:
                 fi
               done
 
-          # Remove duplicates by filename while preserving content.
           find work/integration/sepolicy \
             -type f \
             -printf '%f\n' \
@@ -1518,15 +1500,13 @@ jobs:
             FOUND_TEE=1
           fi
 
-          echo "KeyMint:     $FOUND_KEYMINT"
-          echo "Gatekeeper:  $FOUND_GATEKEEPER"
+          echo "KeyMint:        $FOUND_KEYMINT"
+          echo "Gatekeeper:     $FOUND_GATEKEEPER"
           echo "TEE supplicant: $FOUND_TEE"
 
           test "$FOUND_KEYMINT" = 1
           test "$FOUND_TEE" = 1
 
-          # Gatekeeper is required by the stock chain if the binary
-          # exists in stock. Fail only when stock actually contained it.
           if grep -q \
             'android.hardware.gatekeeper@1.0-service.mitee' \
             work/analysis/security_roots.txt
